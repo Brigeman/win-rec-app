@@ -12,6 +12,10 @@ Windows-only desktop recorder focused on reliable system loopback capture, micro
 - Tray integration:
   - hide panel to tray
   - restore panel via tray `Show Panel`
+- Meeting detection prompt (no auto-record):
+  - monitors call-related apps/windows and loopback activity
+  - shows a top-right prompt when a call is likely
+  - user chooses `Record` or `Not now`
 - Recording modes:
   - microphone
   - system loopback
@@ -27,6 +31,7 @@ Windows-only desktop recorder focused on reliable system loopback capture, micro
 - No cloud API calls are used by this app code.
 - Clipboard copy uses Qt API only (no shell command interpolation).
 - For transcription, set **Local files only** in settings (enabled by default) to prevent model downloads.
+- Meeting detection only inspects process names, active window title, and audio levels (no tab/content capture).
 
 ## Development (Windows)
 

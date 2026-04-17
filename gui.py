@@ -32,6 +32,7 @@ import soundcard as sc
 from app_logger import configure_output_folder_logging, get_logger
 from audio_recorder import AudioRecorder, get_devices
 from clipboard_utils import copy_file_to_clipboard
+from meeting_detection import MeetingDetector
 
 
 CONFIG_FILE = "settings.json"
@@ -316,6 +317,76 @@ class RecorderBarWindow(QWidget):
         super().mouseReleaseEvent(event)
 
 
+class MeetingPromptWindow(QWidget):
+    record_clicked = pyqtSignal()
+    dismiss_clicked = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self._build_ui()
+
+    def _build_ui(self):
+        self.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(360, 96)
+
+        root = QVBoxLayout()
+        root.setContentsMargins(8, 8, 8, 8)
+        panel = QFrame()
+        panel.setObjectName("meetingPromptPanel")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        self.lbl_title = QLabel("Похоже, у вас начался звонок")
+        self.lbl_sub = QLabel("Записать его?")
+        self.lbl_sub.setStyleSheet("color: #bcc5d3; font-size: 11px;")
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.btn_dismiss = QPushButton("Не сейчас")
+        self.btn_record = QPushButton("Записать")
+        self.btn_dismiss.clicked.connect(self.dismiss_clicked.emit)
+        self.btn_record.clicked.connect(self.record_clicked.emit)
+        row.addWidget(self.btn_dismiss)
+        row.addWidget(self.btn_record)
+
+        layout.addWidget(self.lbl_title)
+        layout.addWidget(self.lbl_sub)
+        layout.addLayout(row)
+        panel.setLayout(layout)
+        root.addWidget(panel)
+        self.setLayout(root)
+        self.setStyleSheet(
+            """
+            #meetingPromptPanel {
+                background: rgba(19, 24, 30, 236);
+                border: 1px solid rgba(255, 255, 255, 36);
+                border-radius: 14px;
+            }
+            #meetingPromptPanel QLabel {
+                color: #ecf0f7;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            #meetingPromptPanel QPushButton {
+                color: #edf2fa;
+                background: rgba(255, 255, 255, 16);
+                border: 1px solid rgba(255, 255, 255, 45);
+                border-radius: 8px;
+                padding: 5px 10px;
+            }
+            #meetingPromptPanel QPushButton:hover {
+                background: rgba(255, 255, 255, 28);
+            }
+            """
+        )
+
+
 class SettingsWindow(QMainWindow):
     settings_saved = pyqtSignal()
 
@@ -524,9 +595,18 @@ class TrayApplication(QObject):
         super().__init__()
         self.app = app
         self.recorder = None
-        self.last_mode = "loopback"
+        self.last_mode = "mic"
         self.state = "idle"
         self.warning_popup_shown = False
+        self.prompt_visible = False
+        self.detector = MeetingDetector()
+        self.detector_timer = QTimer(self)
+        self.detector_timer.setInterval(1500)
+        self.detector_timer.timeout.connect(self.evaluate_meeting_detection)
+        self.prompt_autohide_timer = QTimer(self)
+        self.prompt_autohide_timer.setSingleShot(True)
+        self.prompt_autohide_timer.setInterval(14000)
+        self.prompt_autohide_timer.timeout.connect(self.handle_prompt_dismiss)
 
         self.signals = SignalManager()
         self.signals.recording_finished.connect(self.on_recording_finished)
@@ -539,11 +619,15 @@ class TrayApplication(QObject):
         self.generate_icons()
 
         self.bar_window = RecorderBarWindow()
-        self.bar_window.rec_clicked.connect(lambda: self.start_recording(self.last_mode))
+        self.bar_window.rec_clicked.connect(self.start_recording_from_bar)
         self.bar_window.stop_clicked.connect(self.stop_recording)
         self.bar_window.hide_clicked.connect(self.hide_bar)
         self._position_bar()
         self.bar_window.show()
+
+        self.prompt_window = MeetingPromptWindow()
+        self.prompt_window.record_clicked.connect(self.handle_prompt_record)
+        self.prompt_window.dismiss_clicked.connect(self.handle_prompt_dismiss)
 
         self.tray_icon = QSystemTrayIcon(QIcon(self.icon_idle_path), self.app)
         self.tray_icon.setToolTip("win rec app (Idle)")
@@ -554,6 +638,8 @@ class TrayApplication(QObject):
         self.settings_window = SettingsWindow()
         self.settings_window.settings_saved.connect(self.register_hotkeys)
         self.register_hotkeys()
+        self.detector.start()
+        self.detector_timer.start()
         self.tray_icon.showMessage(
             "Ready",
             "Floating panel is visible. Use HIDE to keep it only in tray.",
@@ -566,6 +652,12 @@ class TrayApplication(QObject):
         x = screen.center().x() - (self.bar_window.width() // 2)
         y = screen.top() + 24
         self.bar_window.move(max(0, x), max(0, y))
+
+    def _position_prompt(self):
+        screen = self.app.primaryScreen().availableGeometry()
+        x = screen.right() - self.prompt_window.width() - 18
+        y = screen.top() + 18
+        self.prompt_window.move(max(0, x), max(0, y))
 
     def _set_state(self, state: str, message: str):
         self.state = state
@@ -732,6 +824,46 @@ class TrayApplication(QObject):
         self.bar_window.btn_rec.setEnabled(not recording)
         self.bar_window.btn_stop.setEnabled(recording)
 
+    def evaluate_meeting_detection(self):
+        is_recording = bool(self.recorder and self.recorder.is_alive())
+        decision = self.detector.evaluate(is_recording=is_recording, mic_rms=0.0)
+        if decision.matched_rules or decision.should_prompt:
+            logger.info(
+                "meeting_detector | score=%s | rules=%s | decision=%s | context=%s | loop_rms=%.4f | loop_peak=%.4f | sustain=%.2f",
+                decision.score,
+                ",".join(decision.matched_rules),
+                decision.reason,
+                decision.context_key,
+                decision.debug.get("loopback_rms", 0.0),
+                decision.debug.get("loopback_peak", 0.0),
+                decision.debug.get("loopback_sustain", 0.0),
+            )
+        if decision.should_prompt and not self.prompt_visible:
+            self.show_meeting_prompt()
+
+    def show_meeting_prompt(self):
+        if self.recorder and self.recorder.is_alive():
+            return
+        self._position_prompt()
+        self.prompt_window.show()
+        self.prompt_window.raise_()
+        self.prompt_visible = True
+        self.prompt_autohide_timer.start()
+
+    def dismiss_meeting_prompt(self):
+        if self.prompt_window.isVisible():
+            self.prompt_window.hide()
+        self.prompt_visible = False
+
+    def handle_prompt_record(self):
+        self.dismiss_meeting_prompt()
+        preferred_mode = self.last_mode if self.last_mode in ("mic", "loopback", "both") else "both"
+        self.start_recording(preferred_mode)
+
+    def handle_prompt_dismiss(self):
+        self.dismiss_meeting_prompt()
+        self.detector.set_cooldown_dismiss()
+
     def _has_default_loopback(self) -> bool:
         try:
             default_speaker = sc.default_speaker()
@@ -750,9 +882,38 @@ class TrayApplication(QObject):
             logger.exception("Loopback precheck failed.")
             return False
 
+    def _resolve_record_mode_from_settings(self, settings: Dict) -> str:
+        click_mode = settings.get("tray_click_mode", "Last Used")
+        mapping = {
+            "Microphone": "mic",
+            "Loopback": "loopback",
+            "Both": "both",
+        }
+        mode = mapping.get(click_mode, self.last_mode if self.last_mode in ("mic", "loopback", "both") else "mic")
+
+        has_mic = bool(settings.get("device_id"))
+        has_loopback = self._has_default_loopback()
+
+        if mode == "both" and not (has_mic and has_loopback):
+            if has_mic:
+                return "mic"
+            if has_loopback:
+                return "loopback"
+        if mode == "loopback" and not has_loopback and has_mic:
+            return "mic"
+        if mode == "mic" and not has_mic and has_loopback:
+            return "loopback"
+        return mode
+
+    def start_recording_from_bar(self):
+        settings = self.settings_window.get_settings()
+        mode = self._resolve_record_mode_from_settings(settings)
+        self.start_recording(mode)
+
     def start_recording(self, mode="loopback"):
         if self.recorder and self.recorder.is_alive():
             return
+        self.dismiss_meeting_prompt()
 
         settings = self.settings_window.get_settings()
         output_dir = settings.get("output_folder", default_output_folder())
@@ -857,6 +1018,7 @@ class TrayApplication(QObject):
         self._set_actions_for_recording(False)
         self.recorder = None
         self.warning_popup_shown = False
+        self.detector.set_cooldown_post_stop()
 
         if error:
             compact = self._short_status(error)
@@ -904,6 +1066,9 @@ class TrayApplication(QObject):
         )
 
     def exit_app(self):
+        self.detector_timer.stop()
+        self.prompt_autohide_timer.stop()
+        self.detector.stop()
         if self.recorder:
             self.recorder.stop()
         self.app.quit()

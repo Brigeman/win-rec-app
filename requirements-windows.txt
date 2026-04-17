@@ -6,3 +6,4 @@ lameenc
 keyboard
 faster-whisper
 pyinstaller
+psutil
