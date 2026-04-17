@@ -6,9 +6,12 @@ from typing import Dict, List, Pattern
 @dataclass
 class DetectionRuleSet:
     native_meeting_processes: set[str]
+    teams_processes: set[str]
+    instant_prompt_native_processes: set[str]
     browser_processes: set[str]
     strong_meeting_title_patterns: List[Pattern[str]]
     domain_like_patterns: List[Pattern[str]]
+    instant_prompt_browser_patterns: List[Pattern[str]]
     negative_title_patterns: List[Pattern[str]]
     game_title_patterns: List[Pattern[str]]
     score_weights: Dict[str, int]
@@ -18,6 +21,7 @@ class DetectionRuleSet:
     audio_rms_high: float
     audio_peak_high: float
     audio_sustain_seconds: float
+    teams_audio_sustain_seconds: float
     recent_foreground_seconds: float
     dismiss_cooldown_seconds: float
     post_stop_cooldown_seconds: float
@@ -31,6 +35,15 @@ DEFAULT_RULES = DetectionRuleSet(
     native_meeting_processes={
         "ms-teams.exe",
         "teams.exe",
+        "zoom.exe",
+        "telemost.exe",
+        "yandextelemost.exe",
+    },
+    teams_processes={
+        "ms-teams.exe",
+        "teams.exe",
+    },
+    instant_prompt_native_processes={
         "zoom.exe",
         "telemost.exe",
         "yandextelemost.exe",
@@ -63,6 +76,17 @@ DEFAULT_RULES = DetectionRuleSet(
             r"zoom\.us",
             r"app\.zoom\.us",
             r"telemost\.yandex\.ru",
+        ]
+    ),
+    instant_prompt_browser_patterns=_patterns(
+        [
+            r"meet\.google\.com",
+            r"telemost\.yandex\.ru",
+            r"(?:^|\s)google meet(?:\s|$)",
+            r"yandex telemost",
+            r"телемост",
+            r"zoom\.us",
+            r"(?:^|\s)zoom(?:\s|$)",
         ]
     ),
     negative_title_patterns=_patterns(
@@ -106,6 +130,7 @@ DEFAULT_RULES = DetectionRuleSet(
     audio_rms_high=0.03,
     audio_peak_high=0.12,
     audio_sustain_seconds=6.0,
+    teams_audio_sustain_seconds=3.0,
     recent_foreground_seconds=20.0,
     dismiss_cooldown_seconds=600.0,
     post_stop_cooldown_seconds=120.0,

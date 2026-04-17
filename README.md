@@ -15,6 +15,8 @@ Windows-only desktop recorder focused on reliable system loopback capture, micro
 - Meeting detection prompt (no auto-record):
   - monitors call-related apps/windows and loopback activity
   - shows a top-right prompt when a call is likely
+  - opens prompt instantly for Telemost/Zoom/Google Meet app/url contexts
+  - uses reduced 3-second audio sustain for Teams contexts
   - user chooses `Record` or `Not now`
 - Recording modes:
   - microphone

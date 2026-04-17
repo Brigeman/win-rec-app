@@ -176,6 +176,14 @@ class MeetingDetector:
             matched.append("browser_meeting_domain_like")
             self.last_meeting_foreground_ts = now
 
+        instant_native_context = fg_is_native and fg_proc in self.rules.instant_prompt_native_processes
+        instant_browser_context = fg_is_browser and self._matches_any(fg_title, self.rules.instant_prompt_browser_patterns)
+        instant_prompt_context = instant_native_context or instant_browser_context
+        if instant_native_context:
+            matched.append("instant_prompt_native_context")
+        if instant_browser_context:
+            matched.append("instant_prompt_browser_context")
+
         if now - self.last_meeting_foreground_ts <= self.rules.recent_foreground_seconds:
             score += self.rules.score_weights["recent_foreground_match"]
             matched.append("recent_foreground_match")
@@ -213,11 +221,21 @@ class MeetingDetector:
             matched.append("music_like_audio_only")
 
         context_key = f"{fg_proc}|{self._short_title(fg_title)}"
-        should_prompt = (
-            score >= self.rules.prompt_threshold
-            and audio.sustained_seconds >= self.rules.audio_sustain_seconds
-            and context_key != self.last_prompt_context
-        )
+        is_teams_context = fg_proc in self.rules.teams_processes
+        required_sustain = self.rules.audio_sustain_seconds
+        if is_teams_context:
+            required_sustain = self.rules.teams_audio_sustain_seconds
+            matched.append("teams_context")
+
+        should_prompt = False
+        reason = "threshold_not_met"
+        if context_key != self.last_prompt_context:
+            if instant_prompt_context:
+                should_prompt = True
+                reason = "instant_context"
+            elif score >= self.rules.prompt_threshold and audio.sustained_seconds >= required_sustain:
+                should_prompt = True
+                reason = "threshold_met"
 
         if should_prompt:
             self.last_prompt_context = context_key
@@ -227,12 +245,14 @@ class MeetingDetector:
             score=score,
             matched_rules=matched,
             context_key=context_key,
-            reason="threshold_met" if should_prompt else "threshold_not_met",
+            reason=reason,
             debug={
                 "loopback_rms": audio.rms,
                 "loopback_peak": audio.peak,
                 "loopback_sustain": audio.sustained_seconds,
                 "mic_rms": mic_rms,
+                "required_sustain": required_sustain,
+                "instant_prompt_context": 1.0 if instant_prompt_context else 0.0,
             },
         )
 
