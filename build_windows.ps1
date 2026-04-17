@@ -6,7 +6,7 @@ pip install -r requirements-windows.txt
 pyinstaller `
   --noconsole `
   --onefile `
-  --name QuickAudioRecorder `
+  --name win-rec-app `
   main.py
 
-Write-Host "Build complete: dist\QuickAudioRecorder.exe"
+Write-Host "Build complete: dist\win-rec-app.exe"

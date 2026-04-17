@@ -40,7 +40,7 @@ logger = get_logger()
 
 def default_output_folder() -> str:
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-    out = os.path.join(desktop, "CallRecorderMVP")
+    out = os.path.join(desktop, "win-rec-app")
     os.makedirs(out, exist_ok=True)
     return out
 
@@ -133,7 +133,7 @@ class RecorderBarWindow(QWidget):
         self.set_state("idle", "Ready")
 
     def _build_ui(self):
-        self.setWindowTitle("CallRecorder MVP")
+        self.setWindowTitle("win rec app")
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
@@ -304,7 +304,7 @@ class SettingsWindow(QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings - Quick Audio Recorder")
+        self.setWindowTitle("Settings - win rec app")
         self.setGeometry(120, 120, 520, 700)
         self.init_ui()
         self.load_settings()
@@ -528,7 +528,7 @@ class TrayApplication(QObject):
         self.bar_window.show()
 
         self.tray_icon = QSystemTrayIcon(QIcon(self.icon_idle_path), self.app)
-        self.tray_icon.setToolTip("Quick Audio Recorder (Idle)")
+        self.tray_icon.setToolTip("win rec app (Idle)")
         self.tray_icon.activated.connect(self.on_tray_activated)
         self.build_menu()
         self.tray_icon.show()
@@ -552,7 +552,7 @@ class TrayApplication(QObject):
     def _set_state(self, state: str, message: str):
         self.state = state
         self.bar_window.set_state(state, message)
-        tooltip = f"Quick Audio Recorder ({state})"
+        tooltip = f"win rec app ({state})"
         self.tray_icon.setToolTip(tooltip)
         if state == "recording":
             self.tray_icon.setIcon(QIcon(self.icon_rec_path))

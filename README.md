@@ -1,4 +1,4 @@
-# QuickAudioRecorder (Windows MVP)
+# win rec app (Windows MVP)
 
 Windows-only desktop recorder focused on reliable system loopback capture, microphone capture, and local transcription.
 
@@ -16,10 +16,10 @@ Windows-only desktop recorder focused on reliable system loopback capture, micro
   - microphone
   - system loopback
   - both (mixed)
-- Output saved to `Desktop\\CallRecorderMVP` by default.
+- Output saved to `Desktop\\win-rec-app` by default.
 - File naming format: `YYYY-MM-DD_HH-mm-ss.wav` (or `.mp3` if selected).
 - Optional local transcription with `faster-whisper` to `YYYY-MM-DD_HH-mm-ss.txt`.
-- Structured logs in `%LOCALAPPDATA%\\QuickAudioRecorder\\logs\\app.log`.
+- Structured logs in `%LOCALAPPDATA%\\win-rec-app\\logs\\app.log`.
 
 ## Security notes
 
@@ -61,8 +61,4 @@ If model is missing, recording still works, but transcription will fail with a v
 .\build_windows.ps1
 ```
 
-Output will be in `dist\QuickAudioRecorder.exe`.
-
-## GitHub notes
-
-After force-pushing rewritten history, the GitHub `Contributors` block may take some time to refresh.
+Output will be in `dist\win-rec-app.exe`.

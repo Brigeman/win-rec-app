@@ -8,7 +8,7 @@ _LOGGER_NAME = "quick_audio_recorder"
 
 def _log_dir() -> str:
     base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, "QuickAudioRecorder", "logs")
+    path = os.path.join(base, "win-rec-app", "logs")
     os.makedirs(path, exist_ok=True)
     return path
 
