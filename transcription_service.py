@@ -42,6 +42,14 @@ class FasterWhisperService(TranscriptionService):
             return False, "Audio file for transcription was not found."
 
         model_ref = config.model_path.strip() or config.model_size
+        logger.info(
+            "Transcription config | model_ref=%s | model_path=%s | language=%s | compute_type=%s | local_only=%s",
+            model_ref,
+            config.model_path or "<none>",
+            config.language or "<auto>",
+            config.compute_type,
+            config.local_files_only,
+        )
         try:
             from faster_whisper import WhisperModel
         except Exception as exc:
@@ -91,5 +99,11 @@ class FasterWhisperService(TranscriptionService):
             )
             return True, None
         except Exception as exc:
-            logger.exception("Transcription failed.")
+            logger.exception(
+                "Transcription failed | audio_path=%s | transcript_path=%s | model_ref=%s | local_only=%s",
+                audio_path,
+                transcript_path,
+                model_ref,
+                config.local_files_only,
+            )
             return False, str(exc)

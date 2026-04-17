@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 import keyboard
 import soundcard as sc
 
-from app_logger import get_logger
+from app_logger import configure_output_folder_logging, get_logger
 from audio_recorder import AudioRecorder, get_devices
 from clipboard_utils import copy_file_to_clipboard
 
@@ -51,6 +51,13 @@ def resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+
+def logs_folder() -> str:
+    base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+    path = os.path.join(base, "win-rec-app", "logs")
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 class SignalManager(QObject):
@@ -140,7 +147,7 @@ class RecorderBarWindow(QWidget):
             | Qt.WindowType.FramelessWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(620, 86)
+        self.setFixedSize(680, 86)
 
         root = QVBoxLayout()
         root.setContentsMargins(8, 8, 8, 8)
@@ -170,14 +177,14 @@ class RecorderBarWindow(QWidget):
         self.btn_hide.clicked.connect(self.hide_clicked.emit)
 
         self.lbl_status = QLabel("Ready")
-        self.lbl_status.setMinimumWidth(185)
+        self.lbl_status.setFixedWidth(250)
         self.lbl_timer = QLabel("00:00")
         self.lbl_timer.setMinimumWidth(56)
 
         meter_col = QVBoxLayout()
         meter_col.setSpacing(3)
         self.lbl_meter = QLabel("RMS 0% | Peak 0%")
-        self.lbl_meter.setMinimumWidth(140)
+        self.lbl_meter.setMinimumWidth(120)
 
         self.meter_peak = QProgressBar()
         self.meter_peak.setRange(0, 100)
@@ -244,6 +251,16 @@ class RecorderBarWindow(QWidget):
             """
         )
 
+    def _set_status_text(self, message: str):
+        metrics = self.lbl_status.fontMetrics()
+        elided = metrics.elidedText(
+            message,
+            Qt.TextElideMode.ElideRight,
+            self.lbl_status.width() - 6,
+        )
+        self.lbl_status.setText(elided)
+        self.lbl_status.setToolTip(message)
+
     def _build_timer(self):
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -268,7 +285,7 @@ class RecorderBarWindow(QWidget):
         self.lbl_meter.setText(f"RMS {int(rms * 100)}% | Peak {int(peak * 100)}%")
 
     def set_state(self, state: str, message: str):
-        self.lbl_status.setText(message)
+        self._set_status_text(message)
         if state in ("recording", "warning"):
             self.btn_rec.setEnabled(False)
             self.btn_stop.setEnabled(True)
@@ -595,6 +612,8 @@ class TrayApplication(QObject):
         self.action_show.triggered.connect(self.show_bar)
         self.action_hide = QAction("Hide Panel", self)
         self.action_hide.triggered.connect(self.hide_bar)
+        self.action_open_logs = QAction("Open Logs Folder", self)
+        self.action_open_logs.triggered.connect(self.open_logs_folder)
 
         self.action_record_mic = QAction("Start Recording (Mic)", self)
         self.action_record_mic.triggered.connect(lambda: self.start_recording("mic"))
@@ -613,6 +632,7 @@ class TrayApplication(QObject):
 
         self.menu.addAction(self.action_show)
         self.menu.addAction(self.action_hide)
+        self.menu.addAction(self.action_open_logs)
         self.menu.addSeparator()
         self.menu.addAction(self.action_record_mic)
         self.menu.addAction(self.action_record_loop)
@@ -622,6 +642,33 @@ class TrayApplication(QObject):
         self.menu.addAction(self.action_settings)
         self.menu.addAction(self.action_exit)
         self.tray_icon.setContextMenu(self.menu)
+
+    def open_logs_folder(self):
+        try:
+            os.startfile(logs_folder())
+        except Exception:
+            logger.exception("Failed to open logs folder.")
+            self.tray_icon.showMessage(
+                "Logs",
+                f"Cannot open logs folder: {logs_folder()}",
+                QSystemTrayIcon.MessageIcon.Warning,
+                3200,
+            )
+
+    def _short_status(self, message: str) -> str:
+        text = (message or "").strip()
+        if not text:
+            return "Unknown error"
+        lower = text.lower()
+        if "transcription failed" in lower:
+            return "Transcription failed (see logs)"
+        if "capture stream did not start" in lower:
+            return "Capture did not start (see logs)"
+        if "recorder error" in lower:
+            return "Recording failed (see logs)"
+        if len(text) > 64:
+            return text[:61] + "..."
+        return text
 
     def register_hotkeys(self):
         try:
@@ -705,6 +752,10 @@ class TrayApplication(QObject):
             return
 
         settings = self.settings_window.get_settings()
+        output_dir = settings.get("output_folder", default_output_folder())
+        output_log = configure_output_folder_logging(output_dir)
+        if output_log:
+            logger.info("Recording session logs will also be written to: %s", output_log)
         if mode in ("mic", "both") and not settings.get("device_id"):
             self._set_state("error", "No microphone found. Select a microphone in Settings.")
             self.tray_icon.showMessage(
@@ -745,7 +796,7 @@ class TrayApplication(QObject):
         self.recorder = AudioRecorder(
             mic_id=settings.get("device_id"),
             source_mode=mode,
-            output_folder=settings.get("output_folder", default_output_folder()),
+            output_folder=output_dir,
             output_format=settings.get("format", "WAV"),
             normalize=settings.get("normalize", False),
             on_finish_callback=finish_callback,
@@ -780,20 +831,21 @@ class TrayApplication(QObject):
     def on_status_changed(self, state, message):
         if state == "warning":
             # Keep recording visuals active and avoid popup flood.
-            self._set_state("warning", message)
+            self._set_state("warning", self._short_status(message))
             if not self.warning_popup_shown:
                 self.warning_popup_shown = True
                 self.tray_icon.showMessage(
                     "Recording warning",
-                    message,
+                    self._short_status(message),
                     QSystemTrayIcon.MessageIcon.Warning,
                     2200,
                 )
             return
 
-        self._set_state(state, message)
+        compact = self._short_status(message)
+        self._set_state(state, compact)
         if state == "error":
-            self.tray_icon.showMessage("Recording error", message, QSystemTrayIcon.MessageIcon.Critical, 4000)
+            self.tray_icon.showMessage("Recording error", compact, QSystemTrayIcon.MessageIcon.Critical, 4000)
 
     def on_level_changed(self, metrics):
         self.bar_window.update_meter(metrics)
@@ -804,10 +856,11 @@ class TrayApplication(QObject):
         self.warning_popup_shown = False
 
         if error:
-            self._set_state("error", error)
+            compact = self._short_status(error)
+            self._set_state("error", compact)
             self.tray_icon.showMessage(
                 "Error",
-                f"Recording failed: {error}",
+                f"Recording failed: {compact}",
                 QSystemTrayIcon.MessageIcon.Critical,
                 4500,
             )

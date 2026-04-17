@@ -20,6 +20,7 @@ Windows-only desktop recorder focused on reliable system loopback capture, micro
 - File naming format: `YYYY-MM-DD_HH-mm-ss.wav` (or `.mp3` if selected).
 - Optional local transcription with `faster-whisper` to `YYYY-MM-DD_HH-mm-ss.txt`.
 - Structured logs in `%LOCALAPPDATA%\\win-rec-app\\logs\\app.log`.
+- Recording-session logs are also mirrored to the selected output folder as `app.log`.
 
 ## Security notes
 
