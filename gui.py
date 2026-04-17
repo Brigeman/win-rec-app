@@ -269,7 +269,7 @@ class RecorderBarWindow(QWidget):
 
     def set_state(self, state: str, message: str):
         self.lbl_status.setText(message)
-        if state == "recording":
+        if state in ("recording", "warning"):
             self.btn_rec.setEnabled(False)
             self.btn_stop.setEnabled(True)
             if not self.timer.isActive():
@@ -509,6 +509,7 @@ class TrayApplication(QObject):
         self.recorder = None
         self.last_mode = "loopback"
         self.state = "idle"
+        self.warning_popup_shown = False
 
         self.signals = SignalManager()
         self.signals.recording_finished.connect(self.on_recording_finished)
@@ -556,7 +557,12 @@ class TrayApplication(QObject):
         self.tray_icon.setToolTip(tooltip)
         if state == "recording":
             self.tray_icon.setIcon(QIcon(self.icon_rec_path))
-        elif state in ("idle", "error", "warning"):
+        elif state == "warning":
+            if self.recorder and self.recorder.is_alive():
+                self.tray_icon.setIcon(QIcon(self.icon_rec_path))
+            else:
+                self.tray_icon.setIcon(QIcon(self.icon_idle_path))
+        elif state in ("idle", "error"):
             self.tray_icon.setIcon(QIcon(self.icon_idle_path))
 
     def generate_icons(self):
@@ -676,12 +682,50 @@ class TrayApplication(QObject):
         self.bar_window.btn_rec.setEnabled(not recording)
         self.bar_window.btn_stop.setEnabled(recording)
 
+    def _has_default_loopback(self) -> bool:
+        try:
+            default_speaker = sc.default_speaker()
+            if not default_speaker:
+                return False
+            all_inputs = get_devices(include_loopback=True)
+            speaker_name = getattr(default_speaker, "name", "")
+            if not speaker_name:
+                return False
+            for dev in all_inputs:
+                name = dev.get("name", "")
+                if name == speaker_name or speaker_name in name:
+                    return True
+            return False
+        except Exception:
+            logger.exception("Loopback precheck failed.")
+            return False
+
     def start_recording(self, mode="loopback"):
         if self.recorder and self.recorder.is_alive():
             return
 
         settings = self.settings_window.get_settings()
+        if mode in ("mic", "both") and not settings.get("device_id"):
+            self._set_state("error", "No microphone found. Select a microphone in Settings.")
+            self.tray_icon.showMessage(
+                "Recording error",
+                "No microphone found. Select a microphone in Settings.",
+                QSystemTrayIcon.MessageIcon.Critical,
+                3500,
+            )
+            return
+        if mode in ("loopback", "both") and not self._has_default_loopback():
+            self._set_state("error", "No system loopback source found. Check your output device.")
+            self.tray_icon.showMessage(
+                "Recording error",
+                "No system loopback source found. Check your output device.",
+                QSystemTrayIcon.MessageIcon.Critical,
+                3500,
+            )
+            return
+
         self.last_mode = mode
+        self.warning_popup_shown = False
         self._set_actions_for_recording(True)
         self._set_state("starting", "Starting capture...")
         self.bar_window.update_meter({"rms": 0.0, "peak": 0.0})
@@ -734,11 +778,22 @@ class TrayApplication(QObject):
         )
 
     def on_status_changed(self, state, message):
+        if state == "warning":
+            # Keep recording visuals active and avoid popup flood.
+            self._set_state("warning", message)
+            if not self.warning_popup_shown:
+                self.warning_popup_shown = True
+                self.tray_icon.showMessage(
+                    "Recording warning",
+                    message,
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    2200,
+                )
+            return
+
         self._set_state(state, message)
         if state == "error":
             self.tray_icon.showMessage("Recording error", message, QSystemTrayIcon.MessageIcon.Critical, 4000)
-        elif state == "warning":
-            self.tray_icon.showMessage("Recording warning", message, QSystemTrayIcon.MessageIcon.Warning, 2500)
 
     def on_level_changed(self, metrics):
         self.bar_window.update_meter(metrics)
@@ -746,6 +801,7 @@ class TrayApplication(QObject):
     def on_recording_finished(self, path, error, transcript_path):
         self._set_actions_for_recording(False)
         self.recorder = None
+        self.warning_popup_shown = False
 
         if error:
             self._set_state("error", error)

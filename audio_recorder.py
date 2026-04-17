@@ -199,7 +199,7 @@ class AudioRecorder(threading.Thread):
         self.level_lock = threading.Lock()
         self.last_level_emit = 0.0
         self.last_non_silent_at = 0.0
-        self.last_signal_warning = 0.0
+        self.signal_warning_emitted = False
 
     def _get_device(self, is_loopback):
         if is_loopback:
@@ -244,9 +244,10 @@ class AudioRecorder(threading.Thread):
 
         if peak > 0.01 or rms > 0.005:
             self.last_non_silent_at = now
+            self.signal_warning_emitted = False
         elif self.recording and now - self.last_non_silent_at > 2.5:
-            if now - self.last_signal_warning > 5.0:
-                self.last_signal_warning = now
+            if not self.signal_warning_emitted:
+                self.signal_warning_emitted = True
                 self._emit_status("warning", "No active input signal detected.")
 
     def _on_source_level(self, source_name: str, rms: float, peak: float):
@@ -263,7 +264,7 @@ class AudioRecorder(threading.Thread):
         self.latest_levels = {}
         self.last_level_emit = 0.0
         self.last_non_silent_at = time.time()
-        self.last_signal_warning = 0.0
+        self.signal_warning_emitted = False
         
         try:
             self._emit_status("starting", "Initializing capture devices...")
