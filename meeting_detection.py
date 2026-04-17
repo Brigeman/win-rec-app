@@ -196,6 +196,8 @@ class MeetingDetector:
         instant_browser_context = fg_is_browser and self._matches_any(
             fg_title, self.rules.instant_prompt_browser_patterns
         )
+        if fg_is_browser and strict_context_match and (strong_match or domain_match):
+            instant_browser_context = True
         instant_prompt_context = instant_native_context or instant_browser_context
         if instant_native_context:
             matched.append("instant_prompt_native_context")
@@ -228,7 +230,9 @@ class MeetingDetector:
             score += self.rules.score_weights["game_foreground"]
             matched.append("game_foreground")
 
-        if native_running and audio.sustained_seconds < 1.0:
+        if native_running and audio.sustained_seconds < 1.0 and not (
+            fg_is_browser and (strong_match or domain_match or strict_context_match)
+        ):
             score += self.rules.score_weights["meeting_app_idle"]
             matched.append("meeting_app_idle")
 
