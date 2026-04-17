@@ -49,12 +49,15 @@ python main.py
 
 Default is `local_files_only=true`, so the model must already exist locally.
 
+If `local_files_only` is disabled, the app can auto-download the selected model to:
+`%LOCALAPPDATA%\win-rec-app\models`.
+
 Options:
 
 1. Put model files in a local directory and configure `Model path` in app settings.
 2. Or pre-warm model cache on build machine and bundle/cache it for deployment.
 
-If model is missing, recording still works, but transcription will fail with a visible error.
+If model is missing, recording still works, and transcription will show a visible warning/error.
 
 ## Build single EXE (PyInstaller)
 

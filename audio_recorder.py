@@ -365,7 +365,9 @@ class AudioRecorder(threading.Thread):
                     self.transcript_filepath = txt_path
                     logger.info("Saved transcript: %s", txt_path)
                 else:
-                    raise Exception(f"Transcription failed: {transcribe_error}")
+                    self.transcript_filepath = None
+                    logger.error("Transcription failed after successful recording: %s", transcribe_error)
+                    self._emit_status("warning", f"Transcription failed: {transcribe_error}")
             self._emit_status("idle", "Ready")
 
         except Exception as e:

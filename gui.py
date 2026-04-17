@@ -673,6 +673,9 @@ class TrayApplication(QObject):
     def register_hotkeys(self):
         try:
             keyboard.unhook_all_hotkeys()
+        except AttributeError:
+            # Known keyboard package edge case on some Windows setups.
+            pass
         except Exception:
             logger.exception("Failed to unhook old hotkeys.")
 

@@ -30,7 +30,7 @@ jobs:
       - name: Build Windows executable
         shell: pwsh
         run: |
-          pyinstaller --noconsole --onefile --name win-rec-app main.py
+          pyinstaller --noconsole --onefile --collect-data faster_whisper --collect-data onnxruntime --collect-data huggingface_hub --name win-rec-app main.py
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

@@ -29,6 +29,12 @@ class TranscriptionService:
 
 
 class FasterWhisperService(TranscriptionService):
+    def _models_root(self) -> str:
+        base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+        path = os.path.join(base, "win-rec-app", "models")
+        os.makedirs(path, exist_ok=True)
+        return path
+
     def transcribe_file(
         self,
         audio_path: str,
@@ -66,19 +72,34 @@ class FasterWhisperService(TranscriptionService):
                 config.compute_type,
                 config.local_files_only,
             )
+            download_root = self._models_root()
             model = WhisperModel(
                 model_ref,
                 device="auto",
                 compute_type=config.compute_type,
+                download_root=download_root,
                 local_files_only=config.local_files_only,
             )
 
             language = config.language.strip() or None
-            segments, info = model.transcribe(
-                audio_path,
-                language=language,
-                vad_filter=True,
-            )
+            try:
+                segments, info = model.transcribe(
+                    audio_path,
+                    language=language,
+                    vad_filter=True,
+                )
+            except Exception as vad_exc:
+                if "silero_vad_v6.onnx" in str(vad_exc).lower() or "no_suchfile" in str(vad_exc).lower():
+                    logger.warning(
+                        "VAD asset unavailable, retrying transcription without VAD filter."
+                    )
+                    segments, info = model.transcribe(
+                        audio_path,
+                        language=language,
+                        vad_filter=False,
+                    )
+                else:
+                    raise
             lines = []
             for segment in segments:
                 text = segment.text.strip()
