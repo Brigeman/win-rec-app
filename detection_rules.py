@@ -7,10 +7,12 @@ from typing import Dict, List, Pattern
 class DetectionRuleSet:
     native_meeting_processes: set[str]
     teams_processes: set[str]
+    meeting_context_required_native_processes: set[str]
     instant_prompt_native_processes: set[str]
     browser_processes: set[str]
     strong_meeting_title_patterns: List[Pattern[str]]
     domain_like_patterns: List[Pattern[str]]
+    strict_meeting_context_patterns: List[Pattern[str]]
     instant_prompt_browser_patterns: List[Pattern[str]]
     negative_title_patterns: List[Pattern[str]]
     game_title_patterns: List[Pattern[str]]
@@ -40,6 +42,13 @@ DEFAULT_RULES = DetectionRuleSet(
         "yandextelemost.exe",
     },
     teams_processes={
+        "ms-teams.exe",
+        "teams.exe",
+    },
+    meeting_context_required_native_processes={
+        "zoom.exe",
+        "telemost.exe",
+        "yandextelemost.exe",
         "ms-teams.exe",
         "teams.exe",
     },
@@ -78,15 +87,29 @@ DEFAULT_RULES = DetectionRuleSet(
             r"telemost\.yandex\.ru",
         ]
     ),
+    strict_meeting_context_patterns=_patterns(
+        [
+            r"zoom\.us\/j\/",
+            r"zoom\.us\/wc\/join",
+            r"(?:^|\s)zoom meeting(?:\s|$)",
+            r"(?:^|\s)join (?:a )?meeting(?:\s|$)",
+            r"waiting room",
+            r"meet\.google\.com\/[a-z0-9\-]{6,}",
+            r"telemost\.yandex\.ru\/j\/[0-9a-z]+",
+            r"(?:^|\s)meeting \| microsoft teams(?:\s|$)",
+            r"(?:^|\s)собрание \| microsoft teams(?:\s|$)",
+            r"in a meeting",
+        ]
+    ),
     instant_prompt_browser_patterns=_patterns(
         [
-            r"meet\.google\.com",
-            r"telemost\.yandex\.ru",
-            r"(?:^|\s)google meet(?:\s|$)",
-            r"yandex telemost",
-            r"телемост",
-            r"zoom\.us",
-            r"(?:^|\s)zoom(?:\s|$)",
+            r"zoom\.us\/j\/",
+            r"zoom\.us\/wc\/join",
+            r"(?:^|\s)zoom meeting(?:\s|$)",
+            r"(?:^|\s)join (?:a )?meeting(?:\s|$)",
+            r"waiting room",
+            r"meet\.google\.com\/[a-z0-9\-]{6,}",
+            r"telemost\.yandex\.ru\/j\/[0-9a-z]+",
         ]
     ),
     negative_title_patterns=_patterns(

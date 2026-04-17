@@ -121,8 +121,9 @@ class MeetingDetector:
         self.presence_probe = WindowsPresenceProbe()
         self.audio_probe = LoopbackAudioProbe()
         self.last_meeting_foreground_ts = 0.0
-        self.cooldown_until_ts = 0.0
+        self.context_cooldown_until: Dict[str, float] = {}
         self.last_prompt_context = ""
+        self.last_evaluated_context = ""
 
     def start(self):
         self.audio_probe.start()
@@ -131,17 +132,15 @@ class MeetingDetector:
         self.audio_probe.stop()
 
     def set_cooldown_dismiss(self):
-        self.cooldown_until_ts = time.time() + self.rules.dismiss_cooldown_seconds
+        self._set_context_cooldown(self.rules.dismiss_cooldown_seconds)
 
     def set_cooldown_post_stop(self):
-        self.cooldown_until_ts = time.time() + self.rules.post_stop_cooldown_seconds
+        self._set_context_cooldown(self.rules.post_stop_cooldown_seconds)
 
     def evaluate(self, is_recording: bool, mic_rms: float = 0.0) -> DetectionDecision:
         now = time.time()
         if is_recording:
             return DetectionDecision(False, 0, reason="recording_active")
-        if now < self.cooldown_until_ts:
-            return DetectionDecision(False, 0, reason="cooldown_active")
 
         presence = self.presence_probe.snapshot()
         audio = self.audio_probe.get_activity()
@@ -149,6 +148,11 @@ class MeetingDetector:
         matched: List[str] = []
         fg_title = presence.foreground.title or ""
         fg_proc = (presence.foreground.process_name or "").lower()
+        context_key = f"{fg_proc}|{self._short_title(fg_title)}"
+        self.last_evaluated_context = context_key
+
+        if self._is_context_on_cooldown(context_key, now):
+            return DetectionDecision(False, 0, reason="cooldown_active", context_key=context_key)
 
         native_running = bool(self.rules.native_meeting_processes & presence.running_processes)
         fg_is_native = fg_proc in self.rules.native_meeting_processes
@@ -156,13 +160,21 @@ class MeetingDetector:
 
         strong_match = self._matches_any(fg_title, self.rules.strong_meeting_title_patterns)
         domain_match = self._matches_any(fg_title, self.rules.domain_like_patterns)
+        strict_context_match = self._matches_any(fg_title, self.rules.strict_meeting_context_patterns)
         negative_browser = self._matches_any(fg_title, self.rules.negative_title_patterns)
         game_match = self._matches_any(fg_title, self.rules.game_title_patterns)
 
         if fg_is_native:
-            score += self.rules.score_weights["native_meeting_foreground"]
-            matched.append("native_meeting_foreground")
-            self.last_meeting_foreground_ts = now
+            needs_meeting_context = fg_proc in self.rules.meeting_context_required_native_processes
+            has_meeting_context = strict_context_match
+            if needs_meeting_context and not has_meeting_context:
+                # Zoom home/auth views should not be treated as active call context.
+                score += self.rules.score_weights["native_meeting_background"]
+                matched.append("native_meeting_background")
+            else:
+                score += self.rules.score_weights["native_meeting_foreground"]
+                matched.append("native_meeting_foreground")
+                self.last_meeting_foreground_ts = now
         elif native_running:
             score += self.rules.score_weights["native_meeting_background"]
             matched.append("native_meeting_background")
@@ -176,8 +188,14 @@ class MeetingDetector:
             matched.append("browser_meeting_domain_like")
             self.last_meeting_foreground_ts = now
 
-        instant_native_context = fg_is_native and fg_proc in self.rules.instant_prompt_native_processes
-        instant_browser_context = fg_is_browser and self._matches_any(fg_title, self.rules.instant_prompt_browser_patterns)
+        instant_native_context = (
+            fg_is_native
+            and fg_proc in self.rules.instant_prompt_native_processes
+            and strict_context_match
+        )
+        instant_browser_context = fg_is_browser and self._matches_any(
+            fg_title, self.rules.instant_prompt_browser_patterns
+        )
         instant_prompt_context = instant_native_context or instant_browser_context
         if instant_native_context:
             matched.append("instant_prompt_native_context")
@@ -220,7 +238,6 @@ class MeetingDetector:
             score += self.rules.score_weights["music_like_audio_only"]
             matched.append("music_like_audio_only")
 
-        context_key = f"{fg_proc}|{self._short_title(fg_title)}"
         is_teams_context = fg_proc in self.rules.teams_processes
         required_sustain = self.rules.audio_sustain_seconds
         if is_teams_context:
@@ -255,6 +272,21 @@ class MeetingDetector:
                 "instant_prompt_context": 1.0 if instant_prompt_context else 0.0,
             },
         )
+
+    def _is_context_on_cooldown(self, context_key: str, now: float) -> bool:
+        expiry = self.context_cooldown_until.get(context_key, 0.0)
+        if expiry <= 0.0:
+            return False
+        if now >= expiry:
+            self.context_cooldown_until.pop(context_key, None)
+            return False
+        return True
+
+    def _set_context_cooldown(self, seconds: float):
+        context_key = self.last_evaluated_context or self.last_prompt_context
+        if not context_key:
+            return
+        self.context_cooldown_until[context_key] = time.time() + seconds
 
     @staticmethod
     def _matches_any(text: str, patterns) -> bool:

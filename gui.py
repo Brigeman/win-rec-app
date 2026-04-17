@@ -332,24 +332,32 @@ class MeetingPromptWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(360, 96)
+        # Extra width/height improves readability on 125-150% Windows scaling.
+        self.setFixedSize(440, 132)
 
         root = QVBoxLayout()
-        root.setContentsMargins(8, 8, 8, 8)
+        root.setContentsMargins(10, 10, 10, 10)
         panel = QFrame()
         panel.setObjectName("meetingPromptPanel")
         layout = QVBoxLayout()
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
         self.lbl_title = QLabel("Похоже, у вас начался звонок")
+        self.lbl_title.setWordWrap(True)
         self.lbl_sub = QLabel("Записать его?")
-        self.lbl_sub.setStyleSheet("color: #bcc5d3; font-size: 11px;")
+        self.lbl_sub.setWordWrap(True)
+        self.lbl_sub.setStyleSheet("color: #bcc5d3; font-size: 12px;")
 
         row = QHBoxLayout()
+        row.setSpacing(10)
         row.addStretch(1)
         self.btn_dismiss = QPushButton("Не сейчас")
         self.btn_record = QPushButton("Записать")
+        self.btn_dismiss.setMinimumWidth(124)
+        self.btn_record.setMinimumWidth(124)
+        self.btn_dismiss.setMinimumHeight(34)
+        self.btn_record.setMinimumHeight(34)
         self.btn_dismiss.clicked.connect(self.dismiss_clicked.emit)
         self.btn_record.clicked.connect(self.record_clicked.emit)
         row.addWidget(self.btn_dismiss)
@@ -370,7 +378,7 @@ class MeetingPromptWindow(QWidget):
             }
             #meetingPromptPanel QLabel {
                 color: #ecf0f7;
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 600;
             }
             #meetingPromptPanel QPushButton {
@@ -378,7 +386,9 @@ class MeetingPromptWindow(QWidget):
                 background: rgba(255, 255, 255, 16);
                 border: 1px solid rgba(255, 255, 255, 45);
                 border-radius: 8px;
-                padding: 5px 10px;
+                padding: 6px 12px;
+                font-size: 12px;
+                font-weight: 600;
             }
             #meetingPromptPanel QPushButton:hover {
                 background: rgba(255, 255, 255, 28);
