@@ -62,4 +62,7 @@ If model is missing, recording still works, but transcription will fail with a v
 ```
 
 Output will be in `dist\QuickAudioRecorder.exe`.
-# win-rec-app
+
+## GitHub notes
+
+After force-pushing rewritten history, the GitHub `Contributors` block may take some time to refresh.
