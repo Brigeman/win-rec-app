@@ -1,4 +1,3 @@
-import soundcard as sc
 import soundfile as sf
 import threading
 import time
@@ -10,6 +9,7 @@ import shutil
 from typing import Callable, Dict, Optional, Tuple
 
 from app_logger import get_logger
+from audio_backends import AudioBackend, create_audio_backend
 from transcription_service import (
     FasterWhisperService,
     TranscriptionConfig,
@@ -171,6 +171,7 @@ class AudioRecorder(threading.Thread):
         on_level_callback: Optional[Callable[[Dict[str, float]], None]] = None,
         transcription_service: Optional[TranscriptionService] = None,
         transcription_config: Optional[Dict] = None,
+        audio_backend: Optional[AudioBackend] = None,
     ):
         super().__init__()
         self.mic_id = mic_id
@@ -184,6 +185,7 @@ class AudioRecorder(threading.Thread):
         self.on_level_callback = on_level_callback
         self.transcription_service = transcription_service or FasterWhisperService()
         self.transcription_config = TranscriptionConfig(**(transcription_config or {}))
+        self.audio_backend = audio_backend or create_audio_backend()
         
         self.recording = False
         self.stop_event = threading.Event()
@@ -203,22 +205,9 @@ class AudioRecorder(threading.Thread):
 
     def _get_device(self, is_loopback):
         if is_loopback:
-            # For loopback, we try to find the default speaker's loopback
-            default_speaker = sc.default_speaker()
-            mics = sc.all_microphones(include_loopback=True)
-            # Try exact name match
-            loopback_mic = next((m for m in mics if m.name == default_speaker.name), None)
-            # Try fuzzy match
-            if not loopback_mic:
-                loopback_mic = next((m for m in mics if default_speaker.name in m.name), None)
-            
-            if not loopback_mic:
-                raise Exception("No default system output loopback device found.")
-            return loopback_mic
+            return self.audio_backend.get_default_loopback()
         else:
-            if not self.mic_id:
-                raise Exception("No microphone selected.")
-            return sc.get_microphone(self.mic_id, include_loopback=False)
+            return self.audio_backend.get_microphone(self.mic_id)
 
     def _emit_status(self, state: str, message: str):
         if self.on_status_callback:
@@ -467,8 +456,9 @@ class AudioRecorder(threading.Thread):
             f_mp3.write(mp3_data)
 
 def get_devices(include_loopback=False):
+    backend = create_audio_backend()
     try:
-        devices = sc.all_microphones(include_loopback=include_loopback)
+        devices = backend.list_microphones(include_loopback=include_loopback)
         return [{"id": d.id, "name": d.name} for d in devices]
     except Exception as e:
         logger.exception("Error fetching devices.")

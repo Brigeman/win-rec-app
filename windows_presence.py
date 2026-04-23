@@ -1,29 +1,23 @@
 import ctypes
-from dataclasses import dataclass
-from typing import Dict, Optional, Set
+from typing import Optional, Set
 
-import psutil
+try:
+    import psutil
+except Exception:  # pragma: no cover - available in packaged/runtime envs
+    psutil = None
 
-
-@dataclass
-class ForegroundWindowInfo:
-    process_name: str
-    title: str
+from presence_probe import ForegroundWindowInfo, PresenceProbe, PresenceSnapshot
 
 
-@dataclass
-class PresenceSnapshot:
-    running_processes: Set[str]
-    foreground: ForegroundWindowInfo
-
-
-class WindowsPresenceProbe:
+class WindowsPresenceProbe(PresenceProbe):
     def snapshot(self) -> PresenceSnapshot:
         running = self._running_processes()
         fg = self._foreground_window_info()
         return PresenceSnapshot(running_processes=running, foreground=fg)
 
     def _running_processes(self) -> Set[str]:
+        if psutil is None:
+            return set()
         names: Set[str] = set()
         for proc in psutil.process_iter(["name"]):
             name = (proc.info.get("name") or "").lower()
@@ -55,6 +49,8 @@ class WindowsPresenceProbe:
         if not pid:
             return None
         try:
+            if psutil is None:
+                return None
             proc = psutil.Process(pid)
             return proc.name()
         except Exception:

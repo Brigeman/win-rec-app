@@ -1,6 +1,6 @@
-# win rec app (Windows MVP)
+# win rec app (Windows + macOS)
 
-Windows-only desktop recorder focused on reliable system loopback capture, microphone capture, and local transcription.
+Desktop recorder focused on reliable call capture, microphone capture, and local transcription with separate platform release tracks.
 
 ## MVP features
 
@@ -25,7 +25,9 @@ Windows-only desktop recorder focused on reliable system loopback capture, micro
 - Output saved to `Desktop\\win-rec-app` by default.
 - File naming format: `YYYY-MM-DD_HH-mm-ss.wav` (or `.mp3` if selected).
 - Optional local transcription with `faster-whisper` to `YYYY-MM-DD_HH-mm-ss.txt`.
-- Structured logs in `%LOCALAPPDATA%\\win-rec-app\\logs\\app.log`.
+- Structured logs:
+  - Windows: `%LOCALAPPDATA%\\win-rec-app\\logs\\app.log`
+  - macOS: `~/Library/Application Support/win-rec-app/logs/app.log`
 - Recording-session logs are also mirrored to the selected output folder as `app.log`.
 
 ## Security notes
@@ -52,6 +54,27 @@ pip install -r requirements-windows.txt
 python main.py
 ```
 
+## Development (macOS)
+
+### 1) Install dependencies
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements-macos.txt
+```
+
+### 2) Configure system loopback
+
+Install and configure a virtual loopback device (for example BlackHole). Without it, system-audio capture will be unavailable.
+
+### 3) Run app
+
+```bash
+python main.py
+```
+
 ## Local faster-whisper setup
 
 Default is `local_files_only=true`, so the model must already exist locally.
@@ -66,10 +89,34 @@ Options:
 
 If model is missing, recording still works, and transcription will show a visible warning/error.
 
-## Build single EXE (PyInstaller)
+## Build Windows executable (PyInstaller)
 
 ```powershell
 .\build_windows.ps1
 ```
 
 Output will be in `dist\win-rec-app.exe`.
+
+## Build macOS binary (PyInstaller)
+
+```bash
+chmod +x ./build_macos.sh
+./build_macos.sh
+```
+
+Outputs:
+- `dist/win-rec-app.app` (native app bundle)
+- `dist/win-rec-app-macos.zip` (bundle archive)
+- `dist/win-rec-app-macos.dmg` (installer disk image)
+
+Recommended install flow for users:
+1. Download `win-rec-app-macos.dmg`
+2. Open DMG and drag `win-rec-app.app` into `Applications`
+3. Launch from `Applications`/Launchpad
+
+## Release versioning (separate tracks)
+
+- Windows releases use tags: `win-vX.Y.Z`
+- macOS releases use tags: `mac-vX.Y.Z`
+
+Each workflow publishes only its own artifact, so platform releases can evolve independently.

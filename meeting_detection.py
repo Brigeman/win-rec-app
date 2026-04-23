@@ -4,11 +4,13 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import numpy as np
-import soundcard as sc
 
+from audio_backends import AudioBackend, create_audio_backend
 from app_logger import get_logger
 from detection_rules import DEFAULT_RULES, DetectionRuleSet
-from windows_presence import PresenceSnapshot, WindowsPresenceProbe
+from platform_factory import create_presence_probe
+from platform_runtime import is_macos
+from presence_probe import PresenceProbe
 
 
 logger = get_logger()
@@ -33,14 +35,25 @@ class DetectionDecision:
 
 
 class LoopbackAudioProbe:
-    def __init__(self, interval_seconds: float = 0.75):
+    def __init__(
+        self,
+        interval_seconds: float = 0.75,
+        audio_backend: Optional[AudioBackend] = None,
+        rules: DetectionRuleSet = DEFAULT_RULES,
+    ):
         self.interval_seconds = interval_seconds
+        self.audio_backend = audio_backend or create_audio_backend()
+        self.rules = rules
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._activity = AudioActivity()
 
     def start(self):
+        if is_macos():
+            # soundcard loopback probing is noisy/unsupported on macOS.
+            self._store(0.0, 0.0, 0.0)
+            return
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
@@ -81,7 +94,7 @@ class LoopbackAudioProbe:
                             abs_data = np.abs(data)
                             peak = float(np.max(abs_data))
                             rms = float(np.sqrt(np.mean(np.square(data))))
-                        if rms >= DEFAULT_RULES.audio_rms_medium or peak >= DEFAULT_RULES.audio_peak_medium:
+                        if rms >= self.rules.audio_rms_medium or peak >= self.rules.audio_peak_medium:
                             sustained += self.interval_seconds
                         else:
                             sustained = max(0.0, sustained - self.interval_seconds)
@@ -101,25 +114,23 @@ class LoopbackAudioProbe:
                 last_update_ts=time.time(),
             )
 
-    @staticmethod
-    def _default_loopback_device():
+    def _default_loopback_device(self):
         try:
-            default_speaker = sc.default_speaker()
-            if not default_speaker:
-                return None
-            for mic in sc.all_microphones(include_loopback=True):
-                if mic.name == default_speaker.name or default_speaker.name in mic.name:
-                    return mic
+            return self.audio_backend.get_default_loopback()
         except Exception:
             return None
-        return None
 
 
 class MeetingDetector:
-    def __init__(self, rules: DetectionRuleSet = DEFAULT_RULES):
+    def __init__(
+        self,
+        rules: DetectionRuleSet = DEFAULT_RULES,
+        presence_probe: Optional[PresenceProbe] = None,
+        audio_backend: Optional[AudioBackend] = None,
+    ):
         self.rules = rules
-        self.presence_probe = WindowsPresenceProbe()
-        self.audio_probe = LoopbackAudioProbe()
+        self.presence_probe = presence_probe or create_presence_probe()
+        self.audio_probe = LoopbackAudioProbe(audio_backend=audio_backend, rules=rules)
         self.last_meeting_foreground_ts = 0.0
         self.context_cooldown_until: Dict[str, float] = {}
         self.last_prompt_context = ""

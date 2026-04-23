@@ -2,7 +2,8 @@ import json
 import os
 import shutil
 import tempfile
-from typing import Dict
+import threading
+from typing import Dict, Optional
 
 from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QBrush, QIcon, QKeySequence, QPainter, QPixmap
@@ -26,13 +27,15 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-import keyboard
-import soundcard as sc
-
+from audio_backends import AudioBackend, create_audio_backend
 from app_logger import configure_output_folder_logging, get_logger
 from audio_recorder import AudioRecorder, get_devices
 from clipboard_utils import copy_file_to_clipboard
 from meeting_detection import MeetingDetector
+from hotkeys_service import HotkeyService
+from platform_factory import create_platform_services
+from platform_runtime import is_macos, logs_dir
+from system_ops import SystemOps
 
 
 CONFIG_FILE = "settings.json"
@@ -55,10 +58,7 @@ def resource_path(relative_path):
 
 
 def logs_folder() -> str:
-    base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, "win-rec-app", "logs")
-    os.makedirs(path, exist_ok=True)
-    return path
+    return logs_dir()
 
 
 class SignalManager(QObject):
@@ -66,6 +66,7 @@ class SignalManager(QObject):
     status_changed = pyqtSignal(str, str)
     level_changed = pyqtSignal(object)
     recording_confirmed = pyqtSignal()
+    detection_decision = pyqtSignal(object)
 
 
 class HotkeyEdit(QLineEdit):
@@ -98,7 +99,7 @@ class HotkeyEdit(QLineEdit):
         if modifiers & Qt.KeyboardModifier.AltModifier:
             parts.append("alt")
         if modifiers & Qt.KeyboardModifier.MetaModifier:
-            parts.append("windows")
+            parts.append("command" if is_macos() else "windows")
 
         key_text = ""
         if 0x20 <= key <= 0x7E:
@@ -131,6 +132,7 @@ class RecorderBarWindow(QWidget):
     rec_clicked = pyqtSignal()
     stop_clicked = pyqtSignal()
     hide_clicked = pyqtSignal()
+    settings_clicked = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -148,7 +150,7 @@ class RecorderBarWindow(QWidget):
             | Qt.WindowType.FramelessWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(680, 86)
+        self.setFixedSize(760, 86)
 
         root = QVBoxLayout()
         root.setContentsMargins(8, 8, 8, 8)
@@ -169,13 +171,16 @@ class RecorderBarWindow(QWidget):
         self.btn_rec = QPushButton("REC")
         self.btn_stop = QPushButton("STOP")
         self.btn_hide = QPushButton("HIDE")
+        self.btn_settings = QPushButton("SETTINGS")
         self.btn_rec.setFixedWidth(74)
         self.btn_stop.setFixedWidth(74)
         self.btn_hide.setFixedWidth(70)
+        self.btn_settings.setFixedWidth(92)
         self.btn_stop.setEnabled(False)
         self.btn_rec.clicked.connect(self.rec_clicked.emit)
         self.btn_stop.clicked.connect(self.stop_clicked.emit)
         self.btn_hide.clicked.connect(self.hide_clicked.emit)
+        self.btn_settings.clicked.connect(self.settings_clicked.emit)
 
         self.lbl_status = QLabel("Ready")
         self.lbl_status.setFixedWidth(250)
@@ -206,6 +211,7 @@ class RecorderBarWindow(QWidget):
         panel_layout.addWidget(self.btn_rec)
         panel_layout.addWidget(self.btn_stop)
         panel_layout.addWidget(self.btn_hide)
+        panel_layout.addWidget(self.btn_settings)
         panel_layout.addWidget(self.lbl_status)
         panel_layout.addWidget(self.lbl_timer)
         panel_layout.addLayout(meter_col, 1)
@@ -400,8 +406,9 @@ class MeetingPromptWindow(QWidget):
 class SettingsWindow(QMainWindow):
     settings_saved = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, audio_backend: Optional[AudioBackend] = None):
         super().__init__(parent)
+        self.audio_backend = audio_backend or create_audio_backend()
         self.setWindowTitle("Settings - win rec app")
         self.setGeometry(120, 120, 520, 700)
         self.init_ui()
@@ -507,11 +514,11 @@ class SettingsWindow(QMainWindow):
             if not mics:
                 self.combo_mic.addItem("No microphone found", "")
                 return
-            default_mic = sc.default_microphone()
+            default_mic_id = self.audio_backend.default_microphone_id()
             default_index = 0
             for i, m in enumerate(mics):
                 self.combo_mic.addItem(m["name"], m["id"])
-                if default_mic and m["id"] == getattr(default_mic, "id", None):
+                if default_mic_id and m["id"] == default_mic_id:
                     default_index = i
             self.combo_mic.setCurrentIndex(default_index)
         except Exception:
@@ -601,7 +608,13 @@ class SettingsWindow(QMainWindow):
 
 
 class TrayApplication(QObject):
-    def __init__(self, app):
+    def __init__(
+        self,
+        app,
+        audio_backend: Optional[AudioBackend] = None,
+        hotkey_service: Optional[HotkeyService] = None,
+        system_ops: Optional[SystemOps] = None,
+    ):
         super().__init__()
         self.app = app
         self.recorder = None
@@ -609,7 +622,17 @@ class TrayApplication(QObject):
         self.state = "idle"
         self.warning_popup_shown = False
         self.prompt_visible = False
-        self.detector = MeetingDetector()
+        if not (audio_backend and hotkey_service and system_ops):
+            default_audio, _presence, default_hotkeys, default_ops = create_platform_services()
+            self.audio_backend = audio_backend or default_audio
+            self.hotkey_service = hotkey_service or default_hotkeys
+            self.system_ops = system_ops or default_ops
+            self.detector = MeetingDetector(audio_backend=self.audio_backend, presence_probe=_presence)
+        else:
+            self.audio_backend = audio_backend
+            self.hotkey_service = hotkey_service
+            self.system_ops = system_ops
+            self.detector = MeetingDetector(audio_backend=self.audio_backend)
         self.detector_timer = QTimer(self)
         self.detector_timer.setInterval(1500)
         self.detector_timer.timeout.connect(self.evaluate_meeting_detection)
@@ -623,6 +646,9 @@ class TrayApplication(QObject):
         self.signals.status_changed.connect(self.on_status_changed)
         self.signals.level_changed.connect(self.on_level_changed)
         self.signals.recording_confirmed.connect(self.on_recording_confirmed)
+        self.signals.detection_decision.connect(self.on_detection_decision)
+        self._detector_eval_lock = threading.Lock()
+        self._detector_eval_running = False
 
         self.icon_idle_path = resource_path("icon_idle.png")
         self.icon_rec_path = resource_path("icon_rec.png")
@@ -632,6 +658,7 @@ class TrayApplication(QObject):
         self.bar_window.rec_clicked.connect(self.start_recording_from_bar)
         self.bar_window.stop_clicked.connect(self.stop_recording)
         self.bar_window.hide_clicked.connect(self.hide_bar)
+        self.bar_window.settings_clicked.connect(self.open_settings)
         self._position_bar()
         self.bar_window.show()
 
@@ -645,7 +672,7 @@ class TrayApplication(QObject):
         self.build_menu()
         self.tray_icon.show()
 
-        self.settings_window = SettingsWindow()
+        self.settings_window = SettingsWindow(audio_backend=self.audio_backend)
         self.settings_window.settings_saved.connect(self.register_hotkeys)
         self.register_hotkeys()
         self.detector.start()
@@ -747,7 +774,7 @@ class TrayApplication(QObject):
 
     def open_logs_folder(self):
         try:
-            os.startfile(logs_folder())
+            self.system_ops.open_path(logs_folder())
         except Exception:
             logger.exception("Failed to open logs folder.")
             self.tray_icon.showMessage(
@@ -773,24 +800,18 @@ class TrayApplication(QObject):
         return text
 
     def register_hotkeys(self):
-        try:
-            keyboard.unhook_all_hotkeys()
-        except AttributeError:
-            # Known keyboard package edge case on some Windows setups.
-            pass
-        except Exception:
-            logger.exception("Failed to unhook old hotkeys.")
+        self.hotkey_service.clear()
 
         settings = self.settings_window.get_settings()
         try:
             if settings.get("hk_mic"):
-                keyboard.add_hotkey(settings["hk_mic"], lambda: self.start_recording("mic"))
+                self.hotkey_service.register(settings["hk_mic"], lambda: self.start_recording("mic"))
             if settings.get("hk_loop"):
-                keyboard.add_hotkey(settings["hk_loop"], lambda: self.start_recording("loopback"))
+                self.hotkey_service.register(settings["hk_loop"], lambda: self.start_recording("loopback"))
             if settings.get("hk_both"):
-                keyboard.add_hotkey(settings["hk_both"], lambda: self.start_recording("both"))
+                self.hotkey_service.register(settings["hk_both"], lambda: self.start_recording("both"))
             if settings.get("hk_stop"):
-                keyboard.add_hotkey(settings["hk_stop"], self.stop_recording)
+                self.hotkey_service.register(settings["hk_stop"], self.stop_recording)
         except Exception:
             logger.exception("Failed to register hotkeys.")
             self.tray_icon.showMessage(
@@ -835,8 +856,30 @@ class TrayApplication(QObject):
         self.bar_window.btn_stop.setEnabled(recording)
 
     def evaluate_meeting_detection(self):
+        with self._detector_eval_lock:
+            if self._detector_eval_running:
+                return
+            self._detector_eval_running = True
+
         is_recording = bool(self.recorder and self.recorder.is_alive())
-        decision = self.detector.evaluate(is_recording=is_recording, mic_rms=0.0)
+        threading.Thread(
+            target=self._evaluate_meeting_detection_worker,
+            args=(is_recording,),
+            daemon=True,
+            name="meeting-detector-eval",
+        ).start()
+
+    def _evaluate_meeting_detection_worker(self, is_recording: bool):
+        try:
+            decision = self.detector.evaluate(is_recording=is_recording, mic_rms=0.0)
+            self.signals.detection_decision.emit(decision)
+        except Exception:
+            logger.exception("Meeting detection evaluation failed.")
+        finally:
+            with self._detector_eval_lock:
+                self._detector_eval_running = False
+
+    def on_detection_decision(self, decision):
         if decision.matched_rules or decision.should_prompt:
             logger.info(
                 "meeting_detector | score=%s | rules=%s | decision=%s | context=%s | loop_rms=%.4f | loop_peak=%.4f | sustain=%.2f",
@@ -876,18 +919,8 @@ class TrayApplication(QObject):
 
     def _has_default_loopback(self) -> bool:
         try:
-            default_speaker = sc.default_speaker()
-            if not default_speaker:
-                return False
-            all_inputs = get_devices(include_loopback=True)
-            speaker_name = getattr(default_speaker, "name", "")
-            if not speaker_name:
-                return False
-            for dev in all_inputs:
-                name = dev.get("name", "")
-                if name == speaker_name or speaker_name in name:
-                    return True
-            return False
+            self.audio_backend.get_default_loopback()
+            return True
         except Exception:
             logger.exception("Loopback precheck failed.")
             return False
@@ -973,6 +1006,7 @@ class TrayApplication(QObject):
             output_folder=output_dir,
             output_format=settings.get("format", "WAV"),
             normalize=settings.get("normalize", False),
+            audio_backend=self.audio_backend,
             on_finish_callback=finish_callback,
             on_status_callback=status_callback,
             on_level_callback=level_callback,

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from app_logger import get_logger
+from platform_runtime import app_support_dir
 
 
 logger = get_logger()
@@ -30,8 +31,7 @@ class TranscriptionService:
 
 class FasterWhisperService(TranscriptionService):
     def _models_root(self) -> str:
-        base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
-        path = os.path.join(base, "win-rec-app", "models")
+        path = os.path.join(app_support_dir(), "models")
         os.makedirs(path, exist_ok=True)
         return path
 

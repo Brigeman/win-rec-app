@@ -3,6 +3,8 @@ import os
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
+from platform_runtime import logs_dir
+
 
 _LOGGER_NAME = "quick_audio_recorder"
 _APP_FORMAT = "%(asctime)s | %(levelname)s | %(threadName)s | %(name)s | %(message)s"
@@ -10,10 +12,7 @@ _OUTPUT_HANDLER_KEY = "_win_rec_app_output_handler_path"
 
 
 def _log_dir() -> str:
-    base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, "win-rec-app", "logs")
-    os.makedirs(path, exist_ok=True)
-    return path
+    return logs_dir()
 
 
 def setup_logging() -> logging.Logger:
