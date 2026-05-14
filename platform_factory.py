@@ -17,10 +17,12 @@ def create_presence_probe() -> PresenceProbe:
 def create_call_probe() -> CallProbe:
     """Build the platform-native call session probe.
 
-    On Windows we return :class:`WindowsCallSessionProbe`; the constructor
-    detects whether pycaw/comtypes are importable and silently degrades
-    to an "unavailable" snapshot if not. On macOS / dev hosts we return
-    :class:`NullCallProbe`, which is a no-op.
+    On Windows we return :class:`WindowsCallSessionProbe`, which lazily
+    imports ``pycaw``/``comtypes`` only inside its background probe
+    thread (never in the Qt GUI thread, avoiding ``RPC_E_CHANGED_MODE``).
+    If bootstrap fails, snapshots stay ``available=False``.
+
+    On non-Windows hosts we return :class:`NullCallProbe`.
     """
     if not is_windows():
         return NullCallProbe()

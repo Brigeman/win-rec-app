@@ -17,6 +17,7 @@ from typing import Dict, Optional, Set
 
 from app_logger import get_logger
 from call_probe import CallPidState, CallSessionSnapshot
+from platform_runtime import is_windows
 
 logger = get_logger()
 
@@ -50,11 +51,14 @@ class WindowsCallSessionProbe:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._snapshot = CallSessionSnapshot(available=False)
-        self._available, unavailable_reason = self._probe_dependencies_available()
-        if not self._available:
-            logger.info(
-                "probe_unavailable | reason=%s", unavailable_reason or "unknown"
-            )
+        # IMPORTANT: Never import ``pycaw`` / ``comtypes`` in the Qt GUI
+        # thread --- their import path calls ``CoInitializeEx`` which
+        # conflicts with COM already initialized by PyQt
+        # (RPC_E_CHANGED_MODE ``-2147417850``).  Bootstrap happens only in
+        # :meth:`_run`.
+        self._windows = bool(is_windows())
+        if not self._windows:
+            logger.info("probe_skip | reason=non_windows_platform")
         # since_ts persistence across snapshots (PID seen continuously).
         self._pid_first_seen: Dict[int, float] = {}
         # Per-endpoint error throttling and device-change tracking.
@@ -62,47 +66,44 @@ class WindowsCallSessionProbe:
         self._last_error_log_ts: Dict[str, float] = {"render": 0.0, "capture": 0.0}
         self._last_endpoint_name: Dict[str, str] = {"render": "", "capture": ""}
 
-    @staticmethod
-    def _probe_dependencies_available():
+    def _bootstrap_in_probe_thread(self) -> bool:
+        """Runs only from ``_run``: gen_dir redirect, imports, COM init.
+
+        Returning False means universal capture sessions will stay
+        unavailable; log once here with a traceback.
+        """
         import traceback
 
         try:
-            # PyInstaller onefile unpacks into a read-only ``_MEIPASS``; the
-            # ``comtypes.gen`` package tries to write generated type-library
-            # wrappers into its own package dir at import time, which raises
-            # OSError. Redirect ``comtypes.client.gen_dir`` to a writable
-            # location under ``app_support_dir()`` BEFORE pycaw is imported.
-            try:
-                import os
-                from platform_runtime import app_support_dir
+            # PyInstaller onefile: ``comtypes.gen`` must write to a
+            # writable directory (not frozen ``_MEIPASS``).
+            from platform_runtime import app_support_dir
 
-                gen_dir = os.path.join(app_support_dir(), "comtypes_gen")
-                os.makedirs(gen_dir, exist_ok=True)
-                import comtypes.client  # type: ignore
+            gen_root = os.path.join(app_support_dir(), "comtypes_gen")
+            os.makedirs(gen_root, exist_ok=True)
+            import comtypes.client  # type: ignore
 
-                comtypes.client.gen_dir = gen_dir
-            except Exception:
-                # Pre-redirect failed; fall through so the real error below
-                # is captured with a precise traceback.
-                pass
+            comtypes.client.gen_dir = gen_root
 
-            import pycaw  # noqa: F401
-            import comtypes  # noqa: F401
+            import comtypes  # type: ignore
 
-            # NOTE: do not run any COM call here. This function executes in
-            # the main Qt thread, where PyQt has already initialized COM in
-            # a fixed apartment mode. Touching ``AudioUtilities`` would
-            # call ``CoInitializeEx`` again and raise RPC_E_CHANGED_MODE.
-            # The probe thread does its own ``CoInitialize`` in ``_run``.
-            return True, ""
-        except Exception as exc:  # pragma: no cover - packaged Windows only
-            msg = f"{exc.__class__.__name__}: {exc}"
+            comtypes.CoInitialize()
+
+            import pycaw  # noqa: F401  -- validate import in this apartment
+            return True
+        except Exception as exc:
             tb_lines = traceback.format_exc().strip().splitlines()
-            tail = " || ".join(tb_lines[-3:]) if tb_lines else ""
-            return False, f"{msg} | tb={tail}"
+            tail = " || ".join(tb_lines[-5:]) if tb_lines else ""
+            logger.info(
+                "probe_unavailable | phase=bootstrap | reason=%s: %s | tb=%s",
+                exc.__class__.__name__,
+                exc,
+                tail,
+            )
+            return False
 
     def start(self) -> None:
-        if not self._available:
+        if not self._windows:
             return
         if self._thread and self._thread.is_alive():
             return
@@ -131,12 +132,13 @@ class WindowsCallSessionProbe:
     # --- internals ----------------------------------------------------
 
     def _run(self) -> None:
-        # COM must be initialized on every thread that talks to it.
-        try:
-            import comtypes
-            comtypes.CoInitialize()
-        except Exception:
-            logger.exception("CallSessionProbe: CoInitialize failed.")
+        if not self._bootstrap_in_probe_thread():
+            with self._lock:
+                self._snapshot = CallSessionSnapshot(
+                    timestamp=time.time(), available=False
+                )
+            return
+
         try:
             while not self._stop_event.is_set():
                 try:
@@ -152,7 +154,8 @@ class WindowsCallSessionProbe:
                 time.sleep(self.interval_seconds)
         finally:
             try:
-                import comtypes
+                import comtypes  # type: ignore
+
                 comtypes.CoUninitialize()
             except Exception:
                 pass
