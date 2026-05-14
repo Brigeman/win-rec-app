@@ -27,6 +27,11 @@ class DetectionRuleSet:
     recent_foreground_seconds: float
     dismiss_cooldown_seconds: float
     post_stop_cooldown_seconds: float
+    # Hard-suppress patterns: when the foreground title matches any of
+    # these (e.g. browser is on a search results page), the detector
+    # skips ALL prompts regardless of score. Catches the "user typed
+    # 'zoom meeting' into Google" false-positive class.
+    suppress_title_patterns: List[Pattern[str]] = field(default_factory=list)
 
 
 def _patterns(raw: List[str]) -> List[Pattern[str]]:
@@ -69,14 +74,14 @@ DEFAULT_RULES = DetectionRuleSet(
     },
     strong_meeting_title_patterns=_patterns(
         [
-            r"microsoft teams",
-            r"zoom meeting",
-            r"google meet",
-            r"\bmeet\b",
-            r"телемост",
-            r"yandex telemost",
-            r"video meeting",
             r"meeting \| microsoft teams",
+            r"собрание \| microsoft teams",
+            r"\| microsoft teams$",
+            r"zoom meeting -\s",
+            r"zoom workplace",
+            r"google meet\b",
+            r"телемост\b",
+            r"yandex telemost",
         ]
     ),
     domain_like_patterns=_patterns(
@@ -109,16 +114,22 @@ DEFAULT_RULES = DetectionRuleSet(
     ),
     instant_prompt_browser_patterns=_patterns(
         [
+            # Only real meeting URLs / app-specific room contexts.
+            # Search-page titles like "zoom meeting - Google Search"
+            # must NOT match; this is what caused the user-reported
+            # false positive when searching for "zoom".
             r"zoom\.us\/j\/",
             r"zoom\.us\/wc\/join",
-            r"(?:^|\s)zoom meeting(?:\s|$)",
-            r"(?:^|\s)join (?:a )?meeting(?:\s|$)",
+            r"app\.zoom\.us\/wc\/",
             r"join from zoom workplace app",
-            r"waiting room",
             r"meet\.google\.com\/[a-z0-9\-]{6,}",
-            r"(?:^|\s)meet\s+[–-]\s+[a-z0-9\-]{3,}",
+            # Google Meet tab title in an active room:
+            #   "Meet \u2013 abc-defg-hij \u2013 Google Chrome".
+            # The 3-4-3 dashed ID is unique to a real Meet room and
+            # never appears in a search-results title.
+            r"(?:^|\s)meet\s+[\u2013\u2014\-]\s+[a-z]{2,4}-[a-z]{3,5}-[a-z]{2,4}(?:\s|$|\W)",
             r"telemost\.yandex\.ru\/j\/[0-9a-z]+",
-            r"(?:^|\s)звонок в яндекс телемосте(?:\s|$)",
+            r"(?:^|\s)\u0437\u0432\u043e\u043d\u043e\u043a \u0432 \u044f\u043d\u0434\u0435\u043a\u0441 \u0442\u0435\u043b\u0435\u043c\u043e\u0441\u0442\u0435(?:\s|$)",
         ]
     ),
     negative_title_patterns=_patterns(
@@ -139,6 +150,27 @@ DEFAULT_RULES = DetectionRuleSet(
             r"riot client",
             r"game",
             r"launcher",
+        ]
+    ),
+    suppress_title_patterns=_patterns(
+        [
+            # Search engine result pages — any meeting-looking keyword
+            # in the query line falsely triggers strong/instant rules.
+            r"- google search$",
+            r"- google \u043f\u043e\u0438\u0441\u043a$",  # — Google Поиск
+            r"\u2014 \u043f\u043e\u0438\u0441\u043a google$",  # — Поиск Google
+            r"\u2014 \u044f\u043d\u0434\u0435\u043a\u0441",  # — Яндекс
+            r"\u044f\u043d\u0434\u0435\u043a\u0441\u002e\u0431\u0440\u0430\u0443\u0437\u0435\u0440",  # Яндекс.Браузер home
+            r"- bing$",
+            r"- duckduckgo$",
+            r"\u043f\u043e\u0438\u0441\u043a \u0432 google",  # Поиск в Google
+            r"google search",
+            # New tab / start pages and chrome internals.
+            r"new tab$",
+            r"\u043d\u043e\u0432\u0430\u044f \u0432\u043a\u043b\u0430\u0434\u043a\u0430$",  # Новая вкладка
+            r"chrome:\/\/",
+            r"edge:\/\/",
+            r"about:blank",
         ]
     ),
     score_weights={
