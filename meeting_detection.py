@@ -237,6 +237,19 @@ class LegacyMeetingDetector:
         context_key = f"{fg_proc}|{self._short_title(fg_title)}"
         self.last_evaluated_context = context_key
 
+        # Hard-suppress on search engine result pages / start pages.
+        # These titles legitimately contain meeting keywords (e.g. user
+        # searched "zoom meeting") and would otherwise trigger strong
+        # and instant rules. Suppression bypasses scoring entirely.
+        if self._matches_any(fg_title, self.rules.suppress_title_patterns):
+            return DetectionDecision(
+                False,
+                0,
+                reason="suppress_title",
+                context_key=context_key,
+                matched_rules=["suppress_title"],
+            )
+
         if self._is_context_on_cooldown(context_key, now):
             return DetectionDecision(
                 False, 0, reason="cooldown_active", context_key=context_key
@@ -353,6 +366,13 @@ class LegacyMeetingDetector:
                 audio.sustained_seconds,
                 audio.rms,
                 audio.peak,
+            )
+            # Title preview at DEBUG so we can post-mortem false positives
+            # without leaking raw window titles to INFO-level shared logs.
+            logger.debug(
+                "prompt_start_detail | strategy=legacy | fg_proc=%s | fg_title=%r",
+                fg_proc,
+                self._short_title(fg_title),
             )
 
         return DetectionDecision(

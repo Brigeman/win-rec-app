@@ -75,6 +75,39 @@ class DetectionCoreTests(unittest.TestCase):
         self.assertIn(unblocked.reason, {"instant_context", "threshold_met", "threshold_not_met"})
         self.assertNotEqual(unblocked.reason, "cooldown_active")
 
+    def test_search_results_page_does_not_trigger(self):
+        """Typing 'zoom meeting' into Google must not produce a prompt.
+
+        The suppress_title_patterns path short-circuits all scoring so
+        even strong/instant rules cannot fire on search engine pages.
+        """
+        for title in [
+            "zoom meeting - Google Search",
+            "zoom meeting - Google \u041f\u043e\u0438\u0441\u043a",
+            "google meet \u2014 \u041f\u043e\u0438\u0441\u043a Google",
+            "join a meeting \u2014 \u042f\u043d\u0434\u0435\u043a\u0441",
+            "New Tab",
+            "chrome://newtab",
+        ]:
+            with self.subTest(title=title):
+                detector = LegacyMeetingDetector(
+                    presence_probe=StubPresenceProbe(
+                        process_name="chrome.exe",
+                        title=title,
+                        running={"chrome.exe", "ms-teams.exe"},
+                    ),
+                )
+                detector.audio_probe = StubAudioProbe(
+                    AudioActivity(rms=0.0, peak=0.0, sustained_seconds=0.0)
+                )
+                decision = detector.evaluate(is_recording=False, mic_rms=0.0)
+                self.assertFalse(
+                    decision.should_prompt_start,
+                    f"Search/new-tab title leaked through: {title!r}",
+                )
+                if decision.reason != "cooldown_active":
+                    self.assertEqual(decision.reason, "suppress_title")
+
     def test_same_context_promptable_again_after_cooldown_expires(self):
         detector = LegacyMeetingDetector(
             presence_probe=StubPresenceProbe(

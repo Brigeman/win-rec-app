@@ -89,17 +89,11 @@ class WindowsCallSessionProbe:
             import pycaw  # noqa: F401
             import comtypes  # noqa: F401
 
-            # Force the COM lookup the probe relies on so init-time failures
-            # surface here instead of mid-tick.
-            try:
-                from pycaw.pycaw import AudioUtilities  # type: ignore
-
-                _ = AudioUtilities.GetSpeakers()
-            except Exception:
-                # Allow late failures (e.g. no default device on a headless
-                # box); the probe iteration will skip empty endpoints anyway.
-                pass
-
+            # NOTE: do not run any COM call here. This function executes in
+            # the main Qt thread, where PyQt has already initialized COM in
+            # a fixed apartment mode. Touching ``AudioUtilities`` would
+            # call ``CoInitializeEx`` again and raise RPC_E_CHANGED_MODE.
+            # The probe thread does its own ``CoInitialize`` in ``_run``.
             return True, ""
         except Exception as exc:  # pragma: no cover - packaged Windows only
             msg = f"{exc.__class__.__name__}: {exc}"
