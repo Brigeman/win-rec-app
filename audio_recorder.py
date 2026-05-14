@@ -237,18 +237,41 @@ class AudioRecorder(threading.Thread):
         if self.on_level_callback:
             self.on_level_callback({"rms": rms, "peak": peak})
 
-        if peak > 0.01 or rms > 0.005:
+        # USB / laptop mics are often below 0.01 peak; avoid false alarms
+        # during short pauses. Longer grace for mic / both than loopback-only.
+        mic_like = self.source_mode in ("mic", "both")
+        if mic_like:
+            has_signal = peak > 0.004 or rms > 0.0012
+            silence_s = 8.0
+        else:
+            has_signal = peak > 0.008 or rms > 0.002
+            silence_s = 4.5
+
+        if has_signal:
             self.last_non_silent_at = now
             self.signal_warning_emitted = False
-        elif self.recording and now - self.last_non_silent_at > 2.5:
+        elif self.recording and now - self.last_non_silent_at > silence_s:
             if not self.signal_warning_emitted:
                 self.signal_warning_emitted = True
                 logger.warning(
-                    "recording_warning | warning_kind=no_signal | last_rms=%.4f | last_peak=%.4f",
+                    "recording_warning | warning_kind=no_signal | mode=%s | last_rms=%.4f | last_peak=%.4f",
+                    self.source_mode,
                     rms,
                     peak,
                 )
-                self._emit_status("warning", "No active input signal detected.")
+                if self.source_mode == "mic":
+                    msg = (
+                        "Очень тихий сигнал с микрофона. "
+                        "Чтобы писать голоса из Teams/Zoom, включите режим Both или Loopback."
+                    )
+                elif self.source_mode == "both":
+                    msg = "Слабый сигнал. Проверьте микрофон и громкость в звонке."
+                else:
+                    msg = (
+                        "Слабый сигнал с компьютера (loopback). "
+                        "Увеличьте громкость динамиков или выберите режим Both."
+                    )
+                self._emit_status("warning", msg)
 
         self._maybe_log_progress(now)
 
