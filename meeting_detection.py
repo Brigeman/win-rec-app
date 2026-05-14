@@ -157,10 +157,16 @@ class LegacyMeetingDetector:
         rules: DetectionRuleSet = DEFAULT_RULES,
         presence_probe: Optional[PresenceProbe] = None,
         audio_backend: Optional[AudioBackend] = None,
+        loopback_probe: Optional["LoopbackAudioProbe"] = None,
     ):
         self.rules = rules
         self.presence_probe = presence_probe or create_presence_probe()
-        self.audio_probe = LoopbackAudioProbe(audio_backend=audio_backend, rules=rules)
+        # Accept a shared LoopbackAudioProbe so HybridDetector can reuse
+        # a single loopback thread across both strategies. Falls back to
+        # creating its own probe for backward compatibility.
+        self.audio_probe = loopback_probe or LoopbackAudioProbe(
+            audio_backend=audio_backend, rules=rules
+        )
         self.last_meeting_foreground_ts = 0.0
         self.context_cooldown_until: Dict[str, float] = {}
         self.last_prompt_context = ""

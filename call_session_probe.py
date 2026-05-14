@@ -64,13 +64,48 @@ class WindowsCallSessionProbe:
 
     @staticmethod
     def _probe_dependencies_available():
+        import traceback
+
         try:
+            # PyInstaller onefile unpacks into a read-only ``_MEIPASS``; the
+            # ``comtypes.gen`` package tries to write generated type-library
+            # wrappers into its own package dir at import time, which raises
+            # OSError. Redirect ``comtypes.client.gen_dir`` to a writable
+            # location under ``app_support_dir()`` BEFORE pycaw is imported.
+            try:
+                import os
+                from platform_runtime import app_support_dir
+
+                gen_dir = os.path.join(app_support_dir(), "comtypes_gen")
+                os.makedirs(gen_dir, exist_ok=True)
+                import comtypes.client  # type: ignore
+
+                comtypes.client.gen_dir = gen_dir
+            except Exception:
+                # Pre-redirect failed; fall through so the real error below
+                # is captured with a precise traceback.
+                pass
+
             import pycaw  # noqa: F401
             import comtypes  # noqa: F401
 
+            # Force the COM lookup the probe relies on so init-time failures
+            # surface here instead of mid-tick.
+            try:
+                from pycaw.pycaw import AudioUtilities  # type: ignore
+
+                _ = AudioUtilities.GetSpeakers()
+            except Exception:
+                # Allow late failures (e.g. no default device on a headless
+                # box); the probe iteration will skip empty endpoints anyway.
+                pass
+
             return True, ""
-        except Exception as exc:  # pragma: no cover - exercised only on macOS/dev
-            return False, exc.__class__.__name__
+        except Exception as exc:  # pragma: no cover - packaged Windows only
+            msg = f"{exc.__class__.__name__}: {exc}"
+            tb_lines = traceback.format_exc().strip().splitlines()
+            tail = " || ".join(tb_lines[-3:]) if tb_lines else ""
+            return False, f"{msg} | tb={tail}"
 
     def start(self) -> None:
         if not self._available:
