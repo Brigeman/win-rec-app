@@ -1,0 +1,55 @@
+name: Build Windows Release
+
+on:
+  push:
+    tags:
+      - "win-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-windows.txt
+
+      - name: Core unit tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Windows smoke checks
+        shell: pwsh
+        run: |
+          python scripts/smoke_windows.py
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: |
+          pyinstaller --noconsole --onefile --collect-data faster_whisper --collect-data onnxruntime --collect-data huggingface_hub --hidden-import pycaw --hidden-import comtypes --hidden-import comtypes.client --hidden-import comtypes.gen --name win-rec-app main.py
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-rec-app-windows
+          path: dist/win-rec-app.exe
+
+      - name: Attach EXE to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/win-rec-app.exe

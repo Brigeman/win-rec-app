@@ -1,0 +1,8 @@
+PyQt6
+soundcard
+soundfile
+numpy
+lameenc
+faster-whisper
+pyinstaller
+psutil

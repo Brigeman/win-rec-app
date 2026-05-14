@@ -1,0 +1,59 @@
+name: Build macOS Release
+
+on:
+  push:
+    tags:
+      - "mac-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-macos.txt
+
+      - name: Core unit tests
+        run: |
+          python -m unittest discover -s tests -p "test_*.py"
+
+      - name: macOS smoke checks
+        run: |
+          python scripts/smoke_macos.py
+
+      - name: Build macOS binary
+        run: |
+          rm -rf build dist
+          pyinstaller --windowed --onedir --collect-data faster_whisper --collect-data onnxruntime --collect-data huggingface_hub --name win-rec-app --osx-bundle-identifier com.brigeman.win-rec-app main.py
+          ditto -c -k --sequesterRsrc --keepParent dist/win-rec-app.app dist/win-rec-app-macos.zip
+          hdiutil create -volname "win-rec-app" -srcfolder dist/win-rec-app.app -ov -format UDZO dist/win-rec-app-macos.dmg
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-rec-app-macos
+          path: |
+            dist/win-rec-app.app
+            dist/win-rec-app-macos.zip
+            dist/win-rec-app-macos.dmg
+
+      - name: Attach binary to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/win-rec-app-macos.zip
+            dist/win-rec-app-macos.dmg

@@ -1,0 +1,130 @@
+import os
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+from app_logger import get_logger
+from platform_runtime import app_support_dir
+
+
+logger = get_logger()
+
+
+@dataclass
+class TranscriptionConfig:
+    enabled: bool = True
+    model_size: str = "small"
+    model_path: str = ""
+    language: str = ""
+    compute_type: str = "int8"
+    local_files_only: bool = True
+
+
+class TranscriptionService:
+    def transcribe_file(
+        self,
+        audio_path: str,
+        transcript_path: str,
+        config: TranscriptionConfig,
+    ) -> Tuple[bool, Optional[str]]:
+        raise NotImplementedError
+
+
+class FasterWhisperService(TranscriptionService):
+    def _models_root(self) -> str:
+        path = os.path.join(app_support_dir(), "models")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def transcribe_file(
+        self,
+        audio_path: str,
+        transcript_path: str,
+        config: TranscriptionConfig,
+    ) -> Tuple[bool, Optional[str]]:
+        if not config.enabled:
+            return True, None
+
+        if not os.path.exists(audio_path):
+            return False, "Audio file for transcription was not found."
+
+        model_ref = config.model_path.strip() or config.model_size
+        logger.info(
+            "Transcription config | model_ref=%s | model_path=%s | language=%s | compute_type=%s | local_only=%s",
+            model_ref,
+            config.model_path or "<none>",
+            config.language or "<auto>",
+            config.compute_type,
+            config.local_files_only,
+        )
+        try:
+            from faster_whisper import WhisperModel
+        except Exception as exc:
+            logger.exception("Failed to import faster-whisper.")
+            return False, (
+                "faster-whisper is not installed or failed to load. "
+                f"Details: {exc}"
+            )
+
+        try:
+            logger.info(
+                "Starting local transcription | model=%s | compute_type=%s | local_only=%s",
+                model_ref,
+                config.compute_type,
+                config.local_files_only,
+            )
+            download_root = self._models_root()
+            model = WhisperModel(
+                model_ref,
+                device="auto",
+                compute_type=config.compute_type,
+                download_root=download_root,
+                local_files_only=config.local_files_only,
+            )
+
+            language = config.language.strip() or None
+            try:
+                segments, info = model.transcribe(
+                    audio_path,
+                    language=language,
+                    vad_filter=True,
+                )
+            except Exception as vad_exc:
+                if "silero_vad_v6.onnx" in str(vad_exc).lower() or "no_suchfile" in str(vad_exc).lower():
+                    logger.warning(
+                        "VAD asset unavailable, retrying transcription without VAD filter."
+                    )
+                    segments, info = model.transcribe(
+                        audio_path,
+                        language=language,
+                        vad_filter=False,
+                    )
+                else:
+                    raise
+            lines = []
+            for segment in segments:
+                text = segment.text.strip()
+                if text:
+                    lines.append(text)
+
+            content = "\n".join(lines).strip()
+            if not content:
+                content = "[No speech detected]"
+
+            with open(transcript_path, "w", encoding="utf-8") as txt_file:
+                txt_file.write(content)
+
+            logger.info(
+                "Transcription completed | language=%s | duration=%.2f",
+                getattr(info, "language", "unknown"),
+                getattr(info, "duration", 0.0),
+            )
+            return True, None
+        except Exception as exc:
+            logger.exception(
+                "Transcription failed | audio_path=%s | transcript_path=%s | model_ref=%s | local_only=%s",
+                audio_path,
+                transcript_path,
+                model_ref,
+                config.local_files_only,
+            )
+            return False, str(exc)

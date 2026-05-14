@@ -1,0 +1,11 @@
+PyQt6
+soundcard
+soundfile
+numpy
+lameenc
+keyboard
+faster-whisper
+pyinstaller
+psutil
+pycaw
+comtypes
