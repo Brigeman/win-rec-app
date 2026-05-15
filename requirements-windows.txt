@@ -9,3 +9,4 @@ pyinstaller
 psutil
 pycaw
 comtypes
+uiautomation>=2.0.20

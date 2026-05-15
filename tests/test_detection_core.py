@@ -137,6 +137,21 @@ class DetectionCoreTests(unittest.TestCase):
         self.assertEqual(revived.context_key, same_context)
         self.assertNotEqual(revived.reason, "cooldown_active")
 
+    def test_teams_desktop_active_call_title_instant_prompt(self):
+        detector = LegacyMeetingDetector(
+            presence_probe=StubPresenceProbe(
+                process_name="ms-teams.exe",
+                title="Call with Alex | Microsoft Teams",
+                running={"ms-teams.exe"},
+            ),
+        )
+        detector.audio_probe = StubAudioProbe(
+            AudioActivity(rms=0.0, peak=0.0, sustained_seconds=0.0)
+        )
+        decision = detector.evaluate(is_recording=False, mic_rms=0.0)
+        self.assertTrue(decision.should_prompt_start)
+        self.assertEqual(decision.reason, "instant_context")
+
 
 if __name__ == "__main__":
     unittest.main()

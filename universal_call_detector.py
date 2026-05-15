@@ -1,44 +1,35 @@
-"""Universal call detector.
-
-Detects any third-party call (Teams, Zoom, Discord, Slack huddle,
-Telegram, Telemost, browser WebRTC...) by observing that a non-self
-process simultaneously holds an Active render and capture session on
-the default Windows audio endpoints for at least
-``call_start_sustain_seconds``.
-
-Reuses ``LoopbackAudioProbe`` for low-cost loopback peak/RMS sustain,
-which acts as the secondary "listener-only / split-PID" signal.
-"""
+"""Universal call detector (call-first: UIA + audio + merge)."""
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from app_logger import get_logger
 from audio_backends import AudioBackend
-from call_probe import CallProbe, CallSessionSnapshot
+from call_probe import CallPidState, CallProbe, CallSessionSnapshot
+from call_signal import SOURCE_PRIORITY, CallSignal
+from desktop_call_profiles import (
+    PROFILE_BY_APP_ID,
+    all_known_meeting_process_names,
+    resolve_logical_app_id,
+)
 from detection_rules import (
     DEFAULT_RULES,
     DEFAULT_UNIVERSAL_RULES,
     DetectionRuleSet,
     UniversalCallRules,
 )
-from meeting_detection import DetectionDecision, LoopbackAudioProbe
+from detector_trace import detector_trace_enabled
+from meeting_detection import AudioActivity, DetectionDecision, LoopbackAudioProbe
 
 logger = get_logger()
 
 
 class UniversalCallDetector:
-    """Strategy-equivalent of :class:`LegacyMeetingDetector`.
+    """Call-first detector: merges UIA, known-app audio, core audio, split-PID."""
 
-    Shares the same ``start/stop/set_cooldown_*/evaluate`` shape so
-    callers (e.g. ``TrayApplication``) can swap one for the other.
-    """
-
-    # Class-level latch so probe_unavailable is logged at INFO once per
-    # process lifetime; subsequent occurrences are demoted to DEBUG.
     _probe_unavailable_logged = False
 
     def __init__(
@@ -48,6 +39,7 @@ class UniversalCallDetector:
         universal_rules: UniversalCallRules = DEFAULT_UNIVERSAL_RULES,
         audio_backend: Optional[AudioBackend] = None,
         loopback_probe: Optional[LoopbackAudioProbe] = None,
+        desktop_uia_probe=None,
     ):
         self.rules = rules
         self.universal = universal_rules
@@ -55,199 +47,496 @@ class UniversalCallDetector:
         self.audio_probe = loopback_probe or LoopbackAudioProbe(
             audio_backend=audio_backend, rules=rules
         )
+        self.desktop_uia_probe = desktop_uia_probe
+        if self.desktop_uia_probe is None:
+            self.desktop_uia_probe = self._create_desktop_uia_probe()
+
         self.active_call_pid: Optional[int] = None
         self.active_call_process_name: str = ""
+        self.active_app_id: str = ""
+        self.active_signal_source: str = ""
         self.call_last_seen_ts: float = 0.0
         self.call_start_ts: float = 0.0
-        self.prompted_pids: Dict[int, float] = {}
-        # PID-based cooldown map: pid -> monotonic ts until which we
-        # should not re-prompt for that PID.
-        self.pid_cooldown_until: Dict[int, float] = {}
+        self.prompted_keys: Dict[str, float] = {}
+        self.cooldown_until: Dict[str, float] = {}
         self.last_evaluated_pid: Optional[int] = None
-        # Per-instance log-state trackers so INFO lines fire only on
-        # state transitions; ticks remain DEBUG only.
+        self._best_signal_key: str = ""
+        self._best_signal_since_ts: float = 0.0
+        self._last_positive_call_signal_ts: float = 0.0
+        self._last_uia_score: int = 0
+
         self._logged_candidate_pids: Set[int] = set()
-        self._logged_started_pids: Set[int] = set()
+        self._logged_started_keys: Set[str] = set()
         self._tracked_pid_logged_disappear: Set[int] = set()
         self._prev_log_reason: Optional[str] = None
         self._prev_log_should_prompt: Optional[bool] = None
 
+    @staticmethod
+    def _create_desktop_uia_probe():
+        try:
+            from platform_runtime import is_windows
+
+            if not is_windows():
+                from windows_desktop_call_uia_probe import NullDesktopCallUiaProbe
+
+                return NullDesktopCallUiaProbe()
+            from windows_desktop_call_uia_probe import WindowsDesktopCallUiaProbe
+
+            return WindowsDesktopCallUiaProbe()
+        except Exception:
+            from windows_desktop_call_uia_probe import NullDesktopCallUiaProbe
+
+            return NullDesktopCallUiaProbe()
+
     def start(self) -> None:
         self.call_probe.start()
         self.audio_probe.start()
+        if self.desktop_uia_probe:
+            self.desktop_uia_probe.start()
 
     def stop(self) -> None:
         try:
             self.call_probe.stop()
         finally:
-            self.audio_probe.stop()
-
-    # --- cooldown plumbing the GUI calls --------------------------------
+            try:
+                if self.desktop_uia_probe:
+                    self.desktop_uia_probe.stop()
+            finally:
+                self.audio_probe.stop()
 
     def set_cooldown_dismiss(self) -> None:
-        pid = self.last_evaluated_pid or self.active_call_pid
-        if pid:
-            self.pid_cooldown_until[pid] = (
-                time.time() + self.universal.dismiss_cooldown_seconds
-            )
-            logger.info(
-                "udet_cooldown_set | pid=%s | seconds=%.1f | kind=dismiss",
-                pid,
-                float(self.universal.dismiss_cooldown_seconds),
-            )
+        key = self._cooldown_key(
+            self.active_app_id,
+            self.last_evaluated_pid or self.active_call_pid,
+            self.active_signal_source,
+        )
+        seconds = self.universal.uia_dismiss_cooldown_seconds
+        if self.active_signal_source not in ("uia", "known_app_audio"):
+            seconds = self.universal.dismiss_cooldown_seconds
+        self.cooldown_until[key] = time.time() + seconds
+        logger.info(
+            "udet_cooldown_set | key=%s | seconds=%.1f | kind=dismiss",
+            key,
+            float(seconds),
+        )
 
     def set_cooldown_post_stop(self) -> None:
-        pid = self.active_call_pid or self.last_evaluated_pid
-        if pid:
-            self.pid_cooldown_until[pid] = (
-                time.time() + self.universal.post_stop_cooldown_seconds
-            )
-            logger.info(
-                "udet_cooldown_set | pid=%s | seconds=%.1f | kind=post_stop",
-                pid,
-                float(self.universal.post_stop_cooldown_seconds),
-            )
-        # Reset tracking so a fresh post-stop call cycle starts clean.
+        key = self._cooldown_key(
+            self.active_app_id,
+            self.active_call_pid or self.last_evaluated_pid,
+            self.active_signal_source,
+        )
+        self.cooldown_until[key] = (
+            time.time() + self.universal.post_stop_cooldown_seconds
+        )
+        logger.info(
+            "udet_cooldown_set | key=%s | seconds=%.1f | kind=post_stop",
+            key,
+            float(self.universal.post_stop_cooldown_seconds),
+        )
+        self._reset_tracking()
+
+    def _reset_tracking(self) -> None:
         self.active_call_pid = None
         self.active_call_process_name = ""
+        self.active_app_id = ""
+        self.active_signal_source = ""
         self.call_start_ts = 0.0
         self.call_last_seen_ts = 0.0
-        self._logged_started_pids.clear()
+        self._best_signal_key = ""
+        self._best_signal_since_ts = 0.0
+        self._logged_started_keys.clear()
         self._tracked_pid_logged_disappear.clear()
-
-    # --- evaluation -----------------------------------------------------
 
     def evaluate(self, is_recording: bool, mic_rms: float = 0.0) -> DetectionDecision:
         now = time.time()
         snapshot = self.call_probe.snapshot()
         audio = self.audio_probe.get_activity()
-
-        self._log_tick(snapshot, audio, now)
-
-        if not snapshot.available:
-            self._log_probe_unavailable()
-            return DetectionDecision(
-                should_prompt_start=False,
-                score=0,
-                reason="probe_unavailable",
-                debug={"probe_available": 0.0},
-            )
-
-        candidate_pid, candidate_state, matched = self._select_call_candidate(
-            snapshot, audio
+        desktop_presence = (
+            self.desktop_uia_probe.snapshot()
+            if self.desktop_uia_probe
+            else None
         )
-        self.last_evaluated_pid = candidate_pid
 
-        if candidate_pid is not None and candidate_pid not in self._logged_candidate_pids:
-            self._logged_candidate_pids.add(candidate_pid)
+        self._log_tick(snapshot, audio, now, desktop_presence)
+
+        signals = self._build_signals(snapshot, audio, desktop_presence, now)
+        best = self._pick_best_signal(signals)
+
+        if detector_trace_enabled() and best.score > 0:
             logger.info(
-                "udet_call_candidate | pid=%s | proc=%s | cap_peak=%.4f | ren_peak=%.4f",
-                candidate_pid,
-                candidate_state.process_name or "",
-                float(candidate_state.capture_peak),
-                float(candidate_state.render_peak),
+                "signal_merge | best=%s | score=%s | source=%s | matched=%s",
+                best.app_id or best.process_name,
+                best.score,
+                best.source,
+                ",".join(best.matched[:10]),
             )
 
-        # --- Stop / auto-stop branch (only meaningful during recording) ----
         if is_recording:
-            return self._evaluate_recording(now, snapshot, audio, candidate_pid)
+            return self._evaluate_recording(now, snapshot, audio, best, desktop_presence)
 
-        # --- Start branch -----------------------------------------------
-        if candidate_pid is None:
-            self.active_call_pid = None
-            self.active_call_process_name = ""
-            self.call_start_ts = 0.0
-            self.call_last_seen_ts = 0.0
+        return self._evaluate_start(now, snapshot, audio, best)
+
+  # --- signal builders ------------------------------------------------
+
+    def _build_signals(
+        self,
+        snapshot: CallSessionSnapshot,
+        audio: AudioActivity,
+        desktop_presence,
+        now: float,
+    ) -> List[CallSignal]:
+        signals = [
+            self._signal_from_uia(desktop_presence, audio, snapshot, now),
+            self._signal_from_known_app_audio(snapshot, audio, now),
+            self._signal_from_core_audio(snapshot, audio, now),
+            self._signal_from_split_pid(snapshot, audio, now),
+        ]
+        return [s for s in signals if s.score > 0 or s.active]
+
+    def _signal_from_uia(
+        self, presence, audio: AudioActivity, snapshot: CallSessionSnapshot, now: float
+    ) -> CallSignal:
+        empty = CallSignal(source="uia", since_ts=now)
+        if presence is None or not presence.app_id:
+            return empty
+
+        profile = PROFILE_BY_APP_ID.get(presence.app_id)
+        if profile is None:
+            return empty
+
+        has_loopback = self._loopback_active(audio)
+        has_capture = self._any_known_capture(snapshot)
+        score = int(presence.score)
+        matched = list(presence.matched)
+        if has_loopback and "loopback_active" not in matched:
+            score = min(100, score + 15)
+            matched.append("loopback_active")
+        if has_capture and "capture_active" not in matched:
+            score = min(100, score + 20)
+            matched.append("capture_active")
+
+        self._last_uia_score = score
+        active = score >= profile.min_score
+        if active:
+            self._last_positive_call_signal_ts = now
+
+        return CallSignal(
+            source="uia",
+            app_id=profile.app_id,
+            app=profile.display_name,
+            process_name=presence.process_name or profile.app_id,
+            pid=presence.pid,
+            active=active,
+            score=score,
+            matched=matched,
+            since_ts=now,
+        )
+
+    def _signal_from_known_app_audio(
+        self, snapshot: CallSessionSnapshot, audio: AudioActivity, now: float
+    ) -> CallSignal:
+        empty = CallSignal(source="known_app_audio", since_ts=now)
+        if not snapshot.available:
+            return empty
+        if audio.sustained_seconds < self.universal.known_app_capture_loopback_sustain:
+            return empty
+
+        known = all_known_meeting_process_names()
+        best_score = 0
+        best: Optional[Tuple[int, CallPidState, str]] = None
+
+        for pid, state in snapshot.active_call_pids.items():
+            if pid in snapshot.self_pids:
+                continue
+            name = state.process_name or ""
+            app_id = resolve_logical_app_id(pid, name)
+            if not app_id and name not in known:
+                continue
+            if name in self.universal.negative_process_names:
+                continue
+            if not state.capture_active:
+                continue
+            if app_id is None and name not in known:
+                continue
+            score = 75
+            if app_id:
+                score = 80
+            if score > best_score:
+                best_score = score
+                best = (pid, state, app_id or "")
+
+        if best is None:
+            return empty
+
+        pid, state, app_id = best
+        profile = PROFILE_BY_APP_ID.get(app_id) if app_id else None
+        return CallSignal(
+            source="known_app_audio",
+            app_id=app_id,
+            app=profile.display_name if profile else state.process_name,
+            process_name=state.process_name,
+            pid=pid,
+            active=True,
+            score=best_score,
+            matched=["known_app_capture_plus_loopback"],
+            since_ts=state.since_ts or now,
+        )
+
+    def _signal_from_core_audio(
+        self, snapshot: CallSessionSnapshot, audio: AudioActivity, now: float
+    ) -> CallSignal:
+        empty = CallSignal(source="core_audio", since_ts=now)
+        if not snapshot.available:
+            return empty
+
+        pid, state, matched = self._select_core_audio_candidate(snapshot)
+        if pid is None or state is None:
+            return empty
+
+        return CallSignal(
+            source="core_audio",
+            app_id=resolve_logical_app_id(pid, state.process_name) or "",
+            app=state.process_name,
+            process_name=state.process_name,
+            pid=pid,
+            active=True,
+            score=85,
+            matched=matched,
+            since_ts=state.since_ts or now,
+        )
+
+    def _signal_from_split_pid(
+        self, snapshot: CallSessionSnapshot, audio: AudioActivity, now: float
+    ) -> CallSignal:
+        empty = CallSignal(source="split_pid", since_ts=now)
+        if not snapshot.available:
+            return empty
+        if audio.sustained_seconds < self.universal.split_pid_loopback_sustain:
+            return empty
+
+        capture_pid = None
+        capture_state = None
+        has_render = False
+        for pid, state in snapshot.active_call_pids.items():
+            if pid in snapshot.self_pids:
+                continue
+            name = state.process_name or ""
+            if name in self.universal.self_process_names:
+                continue
+            if name in self.universal.negative_process_names:
+                continue
+            if state.capture_active and state.capture_peak >= self.universal.min_capture_peak:
+                capture_pid = pid
+                capture_state = state
+            if state.render_active:
+                has_render = True
+
+        if capture_pid is None or capture_state is None or not has_render:
+            return empty
+
+        app_id = resolve_logical_app_id(capture_pid, capture_state.process_name) or ""
+        return CallSignal(
+            source="split_pid",
+            app_id=app_id,
+            app=capture_state.process_name,
+            process_name=capture_state.process_name,
+            pid=capture_pid,
+            active=True,
+            score=70,
+            matched=["universal_split_pid_call"],
+            since_ts=capture_state.since_ts or now,
+        )
+
+    def _pick_best_signal(self, signals: List[CallSignal]) -> CallSignal:
+        if not signals:
+            return CallSignal(source="uia", score=0, since_ts=time.time())
+        return max(
+            signals,
+            key=lambda s: (s.score, SOURCE_PRIORITY.get(s.source, 0)),
+        )
+
+    def _select_core_audio_candidate(
+        self, snapshot: CallSessionSnapshot
+    ) -> Tuple[Optional[int], Optional[CallPidState], List[str]]:
+        for pid, state in snapshot.active_call_pids.items():
+            if pid in snapshot.self_pids:
+                continue
+            name = state.process_name or ""
+            if name in self.universal.self_process_names:
+                continue
+            if name in self.universal.negative_process_names:
+                continue
+            if (
+                state.render_active
+                and state.capture_active
+                and state.capture_peak >= self.universal.min_capture_peak
+            ):
+                return pid, state, ["universal_call"]
+        return None, None, []
+
+    def _any_known_capture(self, snapshot: CallSessionSnapshot) -> bool:
+        if not snapshot.available:
+            return False
+        known = all_known_meeting_process_names()
+        for pid, state in snapshot.active_call_pids.items():
+            if pid in snapshot.self_pids:
+                continue
+            if not state.capture_active:
+                continue
+            name = state.process_name or ""
+            if resolve_logical_app_id(pid, name) or name in known:
+                return True
+        return False
+
+    def _loopback_active(self, audio: AudioActivity) -> bool:
+        return (
+            audio.sustained_seconds >= self.universal.known_app_capture_loopback_sustain
+            or audio.peak >= self.rules.audio_peak_medium
+        )
+
+    def _capture_active(self, snapshot: CallSessionSnapshot) -> bool:
+        return self._any_known_capture(snapshot)
+
+  # --- start branch ---------------------------------------------------
+
+    def _evaluate_start(
+        self,
+        now: float,
+        snapshot: CallSessionSnapshot,
+        audio: AudioActivity,
+        best: CallSignal,
+    ) -> DetectionDecision:
+        threshold = self.universal.uia_prompt_threshold
+        signal_key = self._signal_key(best)
+
+        if best.score < threshold or not best.active:
+            self._best_signal_key = ""
+            self._best_signal_since_ts = 0.0
+            if not snapshot.available and best.score == 0:
+                self._log_probe_unavailable()
+                return DetectionDecision(
+                    should_prompt_start=False,
+                    score=0,
+                    reason="probe_unavailable" if not snapshot.available else "no_call_signal",
+                    debug=self._debug_payload(audio, snapshot),
+                )
             return DetectionDecision(
                 should_prompt_start=False,
-                score=0,
-                reason="no_call_pid",
+                score=best.score,
+                reason="no_call_signal",
+                matched_rules=best.matched,
                 debug=self._debug_payload(audio, snapshot),
             )
 
-        # Track sustain on the candidate PID.
-        if self.active_call_pid != candidate_pid:
-            self.active_call_pid = candidate_pid
-            self.active_call_process_name = candidate_state.process_name
-            self.call_start_ts = candidate_state.since_ts or now
-        self.call_last_seen_ts = now
+        if signal_key != self._best_signal_key:
+            self._best_signal_key = signal_key
+            self._best_signal_since_ts = best.since_ts or now
+        elif best.since_ts and best.since_ts < self._best_signal_since_ts:
+            self._best_signal_since_ts = best.since_ts
 
-        if self._on_cooldown(candidate_pid, now):
+        sustain = now - self._best_signal_since_ts
+        sustain_needed = self.universal.uia_start_sustain_seconds
+        if best.source in ("core_audio", "split_pid", "known_app_audio"):
+            sustain_needed = self.universal.call_start_sustain_seconds
+
+        if sustain < sustain_needed:
             return DetectionDecision(
                 should_prompt_start=False,
-                score=0,
-                matched_rules=matched,
-                reason="cooldown_active",
-                call_pid=candidate_pid,
-                call_process_name=candidate_state.process_name,
-                debug=self._debug_payload(audio, snapshot),
-            )
-
-        sustain = now - self.call_start_ts
-        sustain_ok = sustain >= self.universal.call_start_sustain_seconds
-        if not sustain_ok:
-            return DetectionDecision(
-                should_prompt_start=False,
-                score=0,
-                matched_rules=matched,
+                score=best.score,
+                matched_rules=best.matched,
                 reason="awaiting_sustain",
-                call_pid=candidate_pid,
-                call_process_name=candidate_state.process_name,
-                debug=self._debug_payload(audio, snapshot),
+                call_pid=best.pid,
+                call_process_name=best.process_name,
+                app_id=best.app_id,
+                app_display_name=best.app,
+                signal_source=best.source,
+                debug=self._debug_payload(audio, snapshot, extra={"sustain": sustain}),
             )
 
-        if candidate_pid not in self._logged_started_pids:
-            self._logged_started_pids.add(candidate_pid)
-            split_pid = "universal_split_pid_call" in matched
-            logger.info(
-                "udet_call_started | pid=%s | proc=%s | sustain=%.2f | reason=%s",
-                candidate_pid,
-                candidate_state.process_name or "",
-                sustain,
-                "split_pid" if split_pid else "primary",
-            )
-
-        if candidate_pid in self.prompted_pids:
-            # Already asked the user for this PID; don't pester them.
+        cooldown_key = self._cooldown_key(best.app_id, best.pid, best.source)
+        if self._on_cooldown(cooldown_key, now):
             return DetectionDecision(
                 should_prompt_start=False,
-                score=0,
-                matched_rules=matched,
-                reason="already_prompted",
-                call_pid=candidate_pid,
-                call_process_name=candidate_state.process_name,
+                score=best.score,
+                matched_rules=best.matched,
+                reason="cooldown_active",
+                call_pid=best.pid,
+                call_process_name=best.process_name,
+                app_id=best.app_id,
+                app_display_name=best.app,
+                signal_source=best.source,
                 debug=self._debug_payload(audio, snapshot),
             )
 
-        self.prompted_pids[candidate_pid] = now
+        self.active_call_pid = best.pid
+        self.active_call_process_name = best.process_name
+        self.active_app_id = best.app_id
+        self.active_signal_source = best.source
+        self.call_start_ts = best.since_ts or now
+        self.call_last_seen_ts = now
+        self.last_evaluated_pid = best.pid
+
+        if signal_key not in self._logged_started_keys:
+            self._logged_started_keys.add(signal_key)
+            logger.info(
+                "udet_call_started | source=%s | app=%s | pid=%s | sustain=%.2f",
+                best.source,
+                best.app_id,
+                best.pid or "",
+                sustain,
+            )
+
+        if signal_key in self.prompted_keys:
+            return DetectionDecision(
+                should_prompt_start=False,
+                score=best.score,
+                matched_rules=best.matched,
+                reason="already_prompted",
+                call_pid=best.pid,
+                call_process_name=best.process_name,
+                app_id=best.app_id,
+                app_display_name=best.app,
+                signal_source=best.source,
+                debug=self._debug_payload(audio, snapshot),
+            )
+
+        self.prompted_keys[signal_key] = now
+        self._last_positive_call_signal_ts = now
         logger.info(
-            "udet_prompt_start | pid=%s | proc=%s",
-            candidate_pid,
-            candidate_state.process_name or "",
+            "udet_prompt_start | source=%s | app=%s | pid=%s | score=%s",
+            best.source,
+            best.app_id,
+            best.pid or "",
+            best.score,
         )
         return DetectionDecision(
             should_prompt_start=True,
-            score=100,
-            matched_rules=matched or ["universal_call"],
+            score=best.score,
+            matched_rules=best.matched or [best.source],
             reason="call_sustained",
-            call_pid=candidate_pid,
-            call_process_name=candidate_state.process_name,
+            call_pid=best.pid,
+            call_process_name=best.process_name,
+            app_id=best.app_id,
+            app_display_name=best.app,
+            signal_source=best.source,
             debug=self._debug_payload(audio, snapshot),
         )
 
-    # --- helpers --------------------------------------------------------
+  # --- recording branch -----------------------------------------------
 
     def _evaluate_recording(
         self,
         now: float,
         snapshot: CallSessionSnapshot,
-        audio,
-        candidate_pid: Optional[int],
+        audio: AudioActivity,
+        best: CallSignal,
+        desktop_presence,
     ) -> DetectionDecision:
-        # We piggy-back on whichever PID we considered "the call" at start
-        # of the recording. Fall back to the current candidate if we lost
-        # that PID (e.g. user started recording manually).
-        tracked_pid = self.active_call_pid or candidate_pid
+        if self.active_signal_source == "uia":
+            return self._evaluate_recording_uia(now, snapshot, audio, best, desktop_presence)
+
+        tracked_pid = self.active_call_pid
         if tracked_pid is None:
             return DetectionDecision(
                 should_prompt_start=False,
@@ -259,8 +548,6 @@ class UniversalCallDetector:
         tracked_in_snapshot = tracked_pid in snapshot.active_call_pids
         if tracked_in_snapshot:
             self.call_last_seen_ts = now
-            # The tracked PID reappeared after a transient drop; arm the
-            # disappear logger again so we re-log the next absence.
             self._tracked_pid_logged_disappear.discard(tracked_pid)
             return DetectionDecision(
                 should_prompt_start=False,
@@ -268,6 +555,8 @@ class UniversalCallDetector:
                 reason="recording_call_active",
                 call_pid=tracked_pid,
                 call_process_name=self.active_call_process_name,
+                app_id=self.active_app_id,
+                signal_source=self.active_signal_source,
                 debug=self._debug_payload(audio, snapshot),
             )
 
@@ -280,6 +569,7 @@ class UniversalCallDetector:
                 self.active_call_process_name or "",
                 missing_for,
             )
+
         end_sustained = (
             missing_for >= self.universal.call_end_sustain_seconds
             and audio.sustained_seconds < self.universal.split_pid_loopback_sustain
@@ -294,11 +584,7 @@ class UniversalCallDetector:
                 debug=self._debug_payload(audio, snapshot, extra={"missing_for": missing_for}),
             )
 
-        logger.info(
-            "udet_prompt_stop | pid=%s | proc=%s | action=prompt",
-            tracked_pid,
-            self.active_call_process_name or "",
-        )
+        logger.info("udet_prompt_stop | pid=%s | source=%s", tracked_pid, self.active_signal_source)
         return DetectionDecision(
             should_prompt_start=False,
             should_prompt_stop=True,
@@ -307,88 +593,115 @@ class UniversalCallDetector:
             matched_rules=["universal_call_end"],
             call_pid=tracked_pid,
             call_process_name=self.active_call_process_name,
+            app_id=self.active_app_id,
+            signal_source=self.active_signal_source,
             debug=self._debug_payload(audio, snapshot, extra={"missing_for": missing_for}),
         )
 
-    def _select_call_candidate(self, snapshot: CallSessionSnapshot, audio):
-        """Choose the most plausible in-call PID from a snapshot.
+    def _evaluate_recording_uia(
+        self,
+        now: float,
+        snapshot: CallSessionSnapshot,
+        audio: AudioActivity,
+        best: CallSignal,
+        desktop_presence,
+    ) -> DetectionDecision:
+        uia_score = self._last_uia_score
+        if desktop_presence is not None:
+            uia_score = desktop_presence.score
 
-        Primary rule: any non-self PID that holds both render and capture
-        active, capture peak >= ``min_capture_peak``, and is not a known
-        voice-service negative.
+        if uia_score >= self.universal.uia_stop_score_threshold:
+            self._last_positive_call_signal_ts = now
+            return DetectionDecision(
+                should_prompt_start=False,
+                score=uia_score,
+                reason="recording_call_active",
+                call_pid=self.active_call_pid,
+                call_process_name=self.active_call_process_name,
+                app_id=self.active_app_id,
+                signal_source="uia",
+                debug=self._debug_payload(audio, snapshot),
+            )
 
-        Secondary "split PID" rule: if no PID satisfies the primary but
-        some non-self PID has only capture active while another non-self
-        PID has only render active AND the loopback probe reports
-        sustained audio, treat the capture-active PID as the call. This
-        covers Electron WebRTC clients where capture and render live on
-        sibling processes.
-        """
-        matched: List[str] = []
-        primary_pid: Optional[int] = None
-        primary_state = None
+        loopback_ok = self._loopback_active(audio)
+        capture_ok = self._capture_active(snapshot)
+        if loopback_ok or capture_ok:
+            self._last_positive_call_signal_ts = now
+            return DetectionDecision(
+                should_prompt_start=False,
+                score=uia_score,
+                reason="recording_call_active",
+                call_pid=self.active_call_pid,
+                call_process_name=self.active_call_process_name,
+                app_id=self.active_app_id,
+                signal_source="uia",
+                debug=self._debug_payload(audio, snapshot),
+            )
 
-        for pid, state in snapshot.active_call_pids.items():
-            if pid in snapshot.self_pids:
-                continue
-            name = state.process_name or ""
-            if name in self.universal.self_process_names:
-                continue
-            if name in self.universal.negative_process_names:
-                continue
-            if (
-                state.render_active
-                and state.capture_active
-                and state.capture_peak >= self.universal.min_capture_peak
-            ):
-                primary_pid = pid
-                primary_state = state
-                matched.append("universal_call")
-                break
+        quiet_for = now - self._last_positive_call_signal_ts
+        if quiet_for < self.universal.uia_stop_sustain_seconds:
+            return DetectionDecision(
+                should_prompt_start=False,
+                score=uia_score,
+                reason="recording_call_dropping",
+                call_pid=self.active_call_pid,
+                call_process_name=self.active_call_process_name,
+                debug=self._debug_payload(
+                    audio, snapshot, extra={"uia_quiet_for": quiet_for}
+                ),
+            )
 
-        if primary_pid is not None:
-            return primary_pid, primary_state, matched
+        logger.info(
+            "udet_prompt_stop | source=uia | app=%s | quiet_for=%.1f",
+            self.active_app_id,
+            quiet_for,
+        )
+        return DetectionDecision(
+            should_prompt_start=False,
+            should_prompt_stop=True,
+            score=0,
+            reason="call_ended",
+            matched_rules=["uia_call_end"],
+            call_pid=self.active_call_pid,
+            call_process_name=self.active_call_process_name,
+            app_id=self.active_app_id,
+            signal_source="uia",
+            debug=self._debug_payload(audio, snapshot, extra={"uia_quiet_for": quiet_for}),
+        )
 
-        # Split-PID listener relax.
-        if audio.sustained_seconds >= self.universal.split_pid_loopback_sustain:
-            capture_pid = None
-            capture_state = None
-            has_render = False
-            for pid, state in snapshot.active_call_pids.items():
-                if pid in snapshot.self_pids:
-                    continue
-                name = state.process_name or ""
-                if name in self.universal.self_process_names:
-                    continue
-                if name in self.universal.negative_process_names:
-                    continue
-                if state.capture_active and state.capture_peak >= self.universal.min_capture_peak:
-                    capture_pid = pid
-                    capture_state = state
-                if state.render_active:
-                    has_render = True
-            if capture_pid is not None and has_render:
-                matched.append("universal_split_pid_call")
-                return capture_pid, capture_state, matched
+  # --- helpers --------------------------------------------------------
 
-        return None, None, matched
+    @staticmethod
+    def _signal_key(signal: CallSignal) -> str:
+        return f"{signal.source}|{signal.app_id}|{signal.pid or 0}"
 
-    def _on_cooldown(self, pid: int, now: float) -> bool:
-        expiry = self.pid_cooldown_until.get(pid, 0.0)
+    @staticmethod
+    def _cooldown_key(app_id: str, pid: Optional[int], source: str) -> str:
+        if app_id:
+            return f"app:{app_id}"
+        if pid:
+            return f"pid:{pid}"
+        return f"src:{source}"
+
+    def _on_cooldown(self, key: str, now: float) -> bool:
+        expiry = self.cooldown_until.get(key, 0.0)
         if expiry <= 0.0:
             return False
         if now >= expiry:
-            self.pid_cooldown_until.pop(pid, None)
+            self.cooldown_until.pop(key, None)
             return False
         return True
 
-    def _debug_payload(self, audio, snapshot: CallSessionSnapshot, extra=None) -> Dict[str, float]:
+    def _debug_payload(
+        self, audio, snapshot: CallSessionSnapshot, extra=None
+    ) -> Dict[str, float]:
         payload = {
             "loopback_rms": audio.rms,
             "loopback_peak": audio.peak,
             "loopback_sustain": audio.sustained_seconds,
             "probe_available": 1.0 if snapshot.available else 0.0,
             "snapshot_pids": float(len(snapshot.active_call_pids)),
+            "uia_score": float(self._last_uia_score),
         }
         if extra:
             for key, value in extra.items():
@@ -399,11 +712,6 @@ class UniversalCallDetector:
         return payload
 
     def should_log_decision(self, decision: DetectionDecision) -> bool:
-        """Return True only on detector state transitions.
-
-        Used by the GUI to dedup the per-tick ``meeting_detector | ...``
-        info line so the universal detector's INFO stream stays clean.
-        """
         key_reason = decision.reason or ""
         key_prompt = bool(decision.should_prompt_start)
         if (
@@ -415,32 +723,17 @@ class UniversalCallDetector:
         self._prev_log_should_prompt = key_prompt
         return True
 
-    def _log_tick(
-        self, snapshot: CallSessionSnapshot, audio, now: float
-    ) -> None:
+    def _log_tick(self, snapshot, audio, now: float, desktop_presence) -> None:
+        if detector_trace_enabled():
+            return
         if not logger.isEnabledFor(logging.DEBUG):
             return
-        active = [
-            (
-                pid,
-                state.process_name or "",
-                int(bool(state.capture_active)),
-                int(bool(state.render_active)),
-                round(float(state.capture_peak), 4),
-                round(float(state.render_peak), 4),
-                round(max(0.0, now - (state.since_ts or now)), 2),
-            )
-            for pid, state in snapshot.active_call_pids.items()
-        ]
-        tracked_age = 0.0
-        if self.active_call_pid and self.call_start_ts:
-            tracked_age = max(0.0, now - self.call_start_ts)
+        uia_score = desktop_presence.score if desktop_presence else 0
         logger.debug(
-            "udet_tick | active_pids=%s | loop_sustain=%.2f | tracked_pid=%s | tracked_age=%.2f",
-            active,
+            "udet_tick | pids=%s | loop_sustain=%.2f | uia_score=%s",
+            len(snapshot.active_call_pids),
             float(audio.sustained_seconds),
-            self.active_call_pid or "",
-            tracked_age,
+            uia_score,
         )
 
     def _log_probe_unavailable(self) -> None:

@@ -17,6 +17,7 @@ from typing import Dict, Optional, Set
 
 from app_logger import get_logger
 from call_probe import CallPidState, CallSessionSnapshot
+from detector_trace import detector_trace_enabled
 from platform_runtime import is_windows
 
 logger = get_logger()
@@ -205,7 +206,10 @@ class WindowsCallSessionProbe:
         for flow_value, is_capture in ((render_flow, False), (capture_flow, True)):
             endpoint_label = "capture" if is_capture else "render"
             try:
-                sessions = self._enumerate_sessions(flow_value)
+                if is_capture:
+                    sessions = self._enumerate_capture_sessions_all_roles()
+                else:
+                    sessions = self._enumerate_sessions(flow_value)
             except Exception as exc:
                 self._log_probe_error(endpoint_label, exc)
                 continue
@@ -239,6 +243,20 @@ class WindowsCallSessionProbe:
             state.since_ts = first_seen
         self._pid_first_seen = new_first_seen
 
+        if detector_trace_enabled():
+            for pid, state in agg.items():
+                logger.info(
+                    "audio_session | pid=%s | process=%s | render=%s | capture=%s | "
+                    "render_peak=%.4f | capture_peak=%.4f | since=%.2f",
+                    pid,
+                    state.process_name or "",
+                    int(bool(state.render_active)),
+                    int(bool(state.capture_active)),
+                    float(state.render_peak),
+                    float(state.capture_peak),
+                    max(0.0, now - (state.since_ts or now)),
+                )
+
         return CallSessionSnapshot(
             active_call_pids=agg,
             self_pids=self_pids,
@@ -262,27 +280,86 @@ class WindowsCallSessionProbe:
         # `IMMDeviceEnumerator` directly via `GetSpeakers/GetMicrophone`.
         if flow_value == 0:  # render
             return AudioUtilities.GetAllSessions()
-        # capture flow
-        from comtypes import CLSCTX_ALL  # type: ignore
-        from pycaw.pycaw import (  # type: ignore
-            IAudioSessionManager2,
-            AudioSession,
+        # capture flow (console default only — prefer
+        # :meth:`_enumerate_capture_sessions_all_roles` for VoIP).
+        return WindowsCallSessionProbe._sessions_from_capture_device(
+            AudioUtilities.GetMicrophone()
         )
 
-        mic = AudioUtilities.GetMicrophone()
-        if mic is None:
-            return []
-        interface = mic.Activate(IAudioSessionManager2._iid_, CLSCTX_ALL, None)
-        from comtypes import cast, POINTER  # type: ignore
+    def _enumerate_capture_sessions_all_roles(self) -> list:
+        """Sessions on default capture devices for console + communications.
 
-        manager = cast(interface, POINTER(IAudioSessionManager2))
-        enumerator = manager.GetSessionEnumerator()
-        count = enumerator.GetCount()
-        sessions = []
-        for i in range(count):
-            ctl = enumerator.GetSession(i)
-            sessions.append(AudioSession(ctl))
+        VoIP apps (Teams, Zoom) often register on the *communications*
+        default while ``GetMicrophone()`` follows the console default;
+        merging both avoids ``no_call_pid`` when those endpoints differ.
+        """
+        from pycaw.pycaw import AudioUtilities  # type: ignore
+
+        try:
+            from pycaw.constants import EDataFlow, ERole  # type: ignore
+
+            capture_flow = EDataFlow.eCapture.value
+            role_vals = [
+                ERole.eConsole.value,
+                ERole.eMultimedia.value,
+                ERole.eCommunications.value,
+            ]
+        except Exception:
+            capture_flow = 1
+            role_vals = [0, 1, 2]
+
+        sessions: list = []
+        seen_device_ids: Set[str] = set()
+        try:
+            enumerator = AudioUtilities.GetDeviceEnumerator()
+        except Exception:
+            return self._sessions_from_capture_device(AudioUtilities.GetMicrophone())
+
+        for role_val in dict.fromkeys(role_vals):
+            try:
+                device = enumerator.GetDefaultAudioEndpoint(capture_flow, role_val)
+            except Exception:
+                continue
+            if device is None:
+                continue
+            dev_id = ""
+            try:
+                dev_id = str(device.id)
+            except Exception:
+                try:
+                    dev_id = str(device.GetId())  # type: ignore[attr-defined]
+                except Exception:
+                    dev_id = ""
+            if dev_id and dev_id in seen_device_ids:
+                continue
+            if dev_id:
+                seen_device_ids.add(dev_id)
+            chunk = self._sessions_from_capture_device(device)
+            sessions.extend(chunk)
+        if not sessions:
+            return self._sessions_from_capture_device(AudioUtilities.GetMicrophone())
         return sessions
+
+    @staticmethod
+    def _sessions_from_capture_device(device) -> list:
+        """Return active ``AudioSession`` wrappers for a capture ``device``."""
+        if device is None:
+            return []
+        from comtypes import CLSCTX_ALL, cast, POINTER  # type: ignore
+        from pycaw.pycaw import IAudioSessionManager2, AudioSession  # type: ignore
+
+        try:
+            interface = device.Activate(IAudioSessionManager2._iid_, CLSCTX_ALL, None)
+            manager = cast(interface, POINTER(IAudioSessionManager2))
+            enumerator = manager.GetSessionEnumerator()
+            count = enumerator.GetCount()
+            sessions = []
+            for i in range(count):
+                ctl = enumerator.GetSession(i)
+                sessions.append(AudioSession(ctl))
+            return sessions
+        except Exception:
+            return []
 
     @staticmethod
     def _session_pid(session) -> int:

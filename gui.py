@@ -8,7 +8,7 @@ import threading
 from typing import Dict, Optional
 
 from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QBrush, QIcon, QKeySequence, QPainter, QPixmap, QShowEvent
+from PyQt6.QtGui import QAction, QColor, QBrush, QIcon, QKeySequence, QPainter, QPixmap, QShowEvent, QHideEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -216,10 +216,13 @@ class AutohideProgressStrip(QFrame):
         self._fill.setFixedWidth(w)
 
     def _on_tick(self) -> None:
-        self._elapsed_ms += self._timer.interval()
-        self._apply_geometry()
-        if self._elapsed_ms >= self._duration_ms:
-            self._timer.stop()
+        try:
+            self._elapsed_ms += self._timer.interval()
+            self._apply_geometry()
+            if self._elapsed_ms >= self._duration_ms:
+                self._timer.stop()
+        except Exception:
+            logger.debug("toast_strip_tick_failed", exc_info=True)
 
     def _apply_geometry(self) -> None:
         w = max(2, self.width())
@@ -227,11 +230,15 @@ class AutohideProgressStrip(QFrame):
             self._fill.setFixedWidth(w)
             return
         frac = max(0.0, 1.0 - (self._elapsed_ms / float(self._duration_ms)))
-        self._fill.setFixedWidth(max(0, int(w * frac)))
+        self._fill.setFixedWidth(max(2, int(w * frac)))
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         QTimer.singleShot(0, self._apply_geometry)
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        self.stop_reset()
+        super().hideEvent(event)
 
 
 class RecorderBarWindow(QWidget):
@@ -256,38 +263,40 @@ class RecorderBarWindow(QWidget):
             | Qt.WindowType.FramelessWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(800, 98)
+        self.setFixedSize(360, 48)
 
         root = QVBoxLayout()
-        root.setContentsMargins(8, 8, 8, 8)
+        root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(0)
 
         accent = QFrame()
         accent.setObjectName("recorderAccentLine")
-        accent.setFixedHeight(3)
+        accent.setFixedHeight(2)
         root.addWidget(accent)
 
         panel = QFrame()
         panel.setObjectName("recorderPanel")
         panel_layout = QHBoxLayout()
-        panel_layout.setContentsMargins(16, 12, 16, 12)
-        panel_layout.setSpacing(12)
+        panel_layout.setContentsMargins(8, 5, 8, 5)
+        panel_layout.setSpacing(6)
         panel.setLayout(panel_layout)
 
         shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(28)
-        shadow.setOffset(0, 6)
-        shadow.setColor(QColor(0, 0, 0, 140))
+        shadow.setBlurRadius(16)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(0, 0, 0, 110))
         panel.setGraphicsEffect(shadow)
 
         self.btn_rec = QPushButton("REC")
         self.btn_stop = QPushButton("STOP")
         self.btn_hide = QPushButton("HIDE")
-        self.btn_settings = QPushButton("SETTINGS")
-        self.btn_rec.setFixedWidth(78)
-        self.btn_stop.setFixedWidth(78)
-        self.btn_hide.setFixedWidth(72)
-        self.btn_settings.setFixedWidth(96)
+        self.btn_settings = QPushButton("SET")
+        self.btn_rec.setFixedWidth(44)
+        self.btn_stop.setFixedWidth(44)
+        self.btn_hide.setFixedWidth(0)
+        self.btn_hide.setVisible(False)
+        self.btn_settings.setFixedWidth(0)
+        self.btn_settings.setVisible(False)
         self.btn_stop.setEnabled(False)
         self.btn_rec.clicked.connect(self.rec_clicked.emit)
         self.btn_stop.clicked.connect(self.stop_clicked.emit)
@@ -295,31 +304,32 @@ class RecorderBarWindow(QWidget):
         self.btn_settings.clicked.connect(self.settings_clicked.emit)
 
         self.lbl_status = QLabel("Ready")
-        self.lbl_status.setFixedWidth(260)
+        self.lbl_status.setFixedWidth(0)
+        self.lbl_status.setVisible(False)
         self.lbl_timer = QLabel("00:00")
-        self.lbl_timer.setMinimumWidth(58)
+        self.lbl_timer.setMinimumWidth(44)
         self.lbl_timer.setStyleSheet("font-weight: 700; letter-spacing: 0.04em;")
 
         meter_col = QVBoxLayout()
-        meter_col.setSpacing(4)
-        self.lbl_meter = QLabel("RMS 0% | Peak 0%")
-        self.lbl_meter.setMinimumWidth(128)
+        meter_col.setSpacing(3)
+        self.lbl_meter = QLabel("")
+        self.lbl_meter.setMinimumWidth(72)
 
         self.meter_peak = QProgressBar()
         self.meter_peak.setRange(0, 100)
         self.meter_peak.setValue(0)
         self.meter_peak.setTextVisible(False)
-        self.meter_peak.setFixedHeight(10)
+        self.meter_peak.setFixedHeight(6)
 
         self.meter_rms = QProgressBar()
         self.meter_rms.setRange(0, 100)
         self.meter_rms.setValue(0)
         self.meter_rms.setTextVisible(False)
-        self.meter_rms.setFixedHeight(8)
+        self.meter_rms.setFixedHeight(4)
+        self.meter_rms.setVisible(False)
 
         meter_col.addWidget(self.lbl_meter)
         meter_col.addWidget(self.meter_peak)
-        meter_col.addWidget(self.meter_rms)
 
         panel_layout.addWidget(self.btn_rec)
         panel_layout.addWidget(self.btn_stop)
@@ -337,24 +347,24 @@ class RecorderBarWindow(QWidget):
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                     stop:0 #3dd9a0, stop:0.45 #5eb0ff, stop:1 #b18cff);
                 border: none;
-                border-top-left-radius: 18px;
-                border-top-right-radius: 18px;
+                border-top-left-radius: 12px;
+                border-top-right-radius: 12px;
             }
             #recorderPanel {
                 background: rgba(22, 26, 34, 242);
                 border: 1px solid rgba(255, 255, 255, 38);
                 border-top: none;
-                border-bottom-left-radius: 18px;
-                border-bottom-right-radius: 18px;
+                border-bottom-left-radius: 12px;
+                border-bottom-right-radius: 12px;
             }
             QPushButton {
                 color: #f4f7fc;
                 background: rgba(255, 255, 255, 14);
                 border: 1px solid rgba(255, 255, 255, 42);
-                border-radius: 11px;
-                padding: 6px 10px;
+                border-radius: 8px;
+                padding: 4px 8px;
                 font-weight: 600;
-                font-size: 12px;
+                font-size: 11px;
             }
             QPushButton:hover {
                 background: rgba(255, 255, 255, 28);
@@ -367,7 +377,7 @@ class RecorderBarWindow(QWidget):
             }
             QLabel {
                 color: #e8ecf4;
-                font-size: 12px;
+                font-size: 11px;
             }
             QProgressBar {
                 background: rgba(255, 255, 255, 14);
@@ -413,7 +423,8 @@ class RecorderBarWindow(QWidget):
         peak = max(0.0, min(1.0, float(metrics.get("peak", 0.0))))
         self.meter_rms.setValue(int(rms * 100))
         self.meter_peak.setValue(int(peak * 100))
-        self.lbl_meter.setText(f"RMS {int(rms * 100)}% | Peak {int(peak * 100)}%")
+        bars = "▁▂▃▄▅▆▇"[min(7, int(peak * 8))]
+        self.lbl_meter.setText(bars * 4)
 
     def set_state(self, state: str, message: str):
         self._set_status_text(message)
@@ -463,10 +474,10 @@ class MeetingPromptWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(448, 148)
+        self.setFixedSize(320, 92)
 
         root = QVBoxLayout()
-        root.setContentsMargins(10, 10, 10, 10)
+        root.setContentsMargins(6, 6, 6, 6)
         panel = QFrame()
         panel.setObjectName("meetingPromptPanel")
         outer = QVBoxLayout()
@@ -475,24 +486,24 @@ class MeetingPromptWindow(QWidget):
         outer.addWidget(self.autohide_strip)
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
 
         self.lbl_title = QLabel("Похоже, у вас начался звонок")
         self.lbl_title.setWordWrap(True)
-        self.lbl_sub = QLabel("Записать его?")
+        self.lbl_sub = QLabel("Возможно, пора начать запись.")
         self.lbl_sub.setWordWrap(True)
-        self.lbl_sub.setStyleSheet("color: #aab4c4; font-size: 12px; font-weight: 500;")
+        self.lbl_sub.setStyleSheet("color: #aab4c4; font-size: 10px; font-weight: 500;")
 
         row = QHBoxLayout()
-        row.setSpacing(10)
+        row.setSpacing(8)
         row.addStretch(1)
         self.btn_dismiss = QPushButton("Не сейчас")
         self.btn_record = QPushButton("Записать")
-        self.btn_dismiss.setMinimumWidth(128)
-        self.btn_record.setMinimumWidth(128)
-        self.btn_dismiss.setMinimumHeight(36)
-        self.btn_record.setMinimumHeight(36)
+        self.btn_dismiss.setMinimumWidth(96)
+        self.btn_record.setMinimumWidth(96)
+        self.btn_dismiss.setMinimumHeight(28)
+        self.btn_record.setMinimumHeight(28)
         self.btn_dismiss.clicked.connect(self.dismiss_clicked.emit)
         self.btn_record.clicked.connect(self.record_clicked.emit)
         row.addWidget(self.btn_dismiss)
@@ -510,32 +521,32 @@ class MeetingPromptWindow(QWidget):
             #meetingPromptPanel {
                 background: rgba(22, 26, 34, 245);
                 border: 1px solid rgba(255, 255, 255, 40);
-                border-radius: 18px;
+                border-radius: 12px;
             }
             #toastProgressTrack {
                 background: rgba(0, 0, 0, 0.35);
                 border: none;
-                border-top-left-radius: 17px;
-                border-top-right-radius: 17px;
+                border-top-left-radius: 11px;
+                border-top-right-radius: 11px;
             }
             #toastProgressFill {
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                     stop:0 #3dd9a0, stop:0.45 #5eb0ff, stop:1 #b18cff);
                 border: none;
-                border-top-left-radius: 17px;
+                border-top-left-radius: 11px;
             }
             #meetingPromptPanel QLabel {
                 color: #f0f4fb;
-                font-size: 14px;
+                font-size: 12px;
                 font-weight: 600;
             }
             #meetingPromptPanel QPushButton {
                 color: #f4f7fc;
                 background: rgba(255, 255, 255, 12);
                 border: 1px solid rgba(255, 255, 255, 44);
-                border-radius: 11px;
-                padding: 7px 14px;
-                font-size: 12px;
+                border-radius: 8px;
+                padding: 5px 10px;
+                font-size: 11px;
                 font-weight: 600;
             }
             #meetingPromptPanel QPushButton:hover {
@@ -568,10 +579,10 @@ class StopRecordingPromptWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(448, 148)
+        self.setFixedSize(320, 92)
 
         root = QVBoxLayout()
-        root.setContentsMargins(10, 10, 10, 10)
+        root.setContentsMargins(6, 6, 6, 6)
         panel = QFrame()
         panel.setObjectName("stopPromptPanel")
         outer = QVBoxLayout()
@@ -580,24 +591,24 @@ class StopRecordingPromptWindow(QWidget):
         outer.addWidget(self.autohide_strip)
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
 
         self.lbl_title = QLabel("Похоже, звонок завершился")
         self.lbl_title.setWordWrap(True)
         self.lbl_sub = QLabel("Остановить запись?")
         self.lbl_sub.setWordWrap(True)
-        self.lbl_sub.setStyleSheet("color: #aab4c4; font-size: 12px; font-weight: 500;")
+        self.lbl_sub.setStyleSheet("color: #aab4c4; font-size: 10px; font-weight: 500;")
 
         row = QHBoxLayout()
-        row.setSpacing(10)
+        row.setSpacing(8)
         row.addStretch(1)
         self.btn_continue = QPushButton("Продолжить")
         self.btn_stop = QPushButton("Остановить")
-        self.btn_continue.setMinimumWidth(128)
-        self.btn_stop.setMinimumWidth(128)
-        self.btn_continue.setMinimumHeight(36)
-        self.btn_stop.setMinimumHeight(36)
+        self.btn_continue.setMinimumWidth(96)
+        self.btn_stop.setMinimumWidth(96)
+        self.btn_continue.setMinimumHeight(28)
+        self.btn_stop.setMinimumHeight(28)
         self.btn_continue.clicked.connect(self.continue_clicked.emit)
         self.btn_stop.clicked.connect(self.stop_clicked.emit)
         row.addWidget(self.btn_continue)
@@ -615,32 +626,32 @@ class StopRecordingPromptWindow(QWidget):
             #stopPromptPanel {
                 background: rgba(22, 26, 34, 245);
                 border: 1px solid rgba(255, 255, 255, 40);
-                border-radius: 18px;
+                border-radius: 12px;
             }
-            #toastProgressTrack {
+            #stopPromptPanel #toastProgressTrack {
                 background: rgba(0, 0, 0, 0.35);
                 border: none;
-                border-top-left-radius: 17px;
-                border-top-right-radius: 17px;
+                border-top-left-radius: 11px;
+                border-top-right-radius: 11px;
             }
-            #toastProgressFill {
+            #stopPromptPanel #toastProgressFill {
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                     stop:0 #3dd9a0, stop:0.45 #5eb0ff, stop:1 #b18cff);
                 border: none;
-                border-top-left-radius: 17px;
+                border-top-left-radius: 11px;
             }
             #stopPromptPanel QLabel {
                 color: #f0f4fb;
-                font-size: 14px;
+                font-size: 12px;
                 font-weight: 600;
             }
             #stopPromptPanel QPushButton {
                 color: #f4f7fc;
                 background: rgba(255, 255, 255, 12);
                 border: 1px solid rgba(255, 255, 255, 44);
-                border-radius: 11px;
-                padding: 7px 14px;
-                font-size: 12px;
+                border-radius: 8px;
+                padding: 5px 10px;
+                font-size: 11px;
                 font-weight: 600;
             }
             #stopPromptPanel QPushButton:hover {
@@ -1136,8 +1147,8 @@ class TrayApplication(QObject):
             return "Capture did not start (see logs)"
         if "recorder error" in lower:
             return "Recording failed (see logs)"
-        if len(text) > 64:
-            return text[:61] + "..."
+        if len(text) > 52:
+            return text[:49] + "..."
         return text
 
     @staticmethod
@@ -1364,15 +1375,18 @@ class TrayApplication(QObject):
     def show_meeting_prompt(self, decision=None):
         if self.recorder and self.recorder.is_alive():
             return
-        # Optionally personalize the title when we have a process name.
+        friendly = ""
         proc = ""
         if decision is not None:
+            friendly = (getattr(decision, "app_display_name", "") or "").strip()
             proc = (getattr(decision, "call_process_name", "") or "").strip()
-        if proc:
-            friendly = self._friendly_app_name(proc)
-            self.prompt_window.lbl_title.setText(f"Похоже, начался звонок в {friendly}")
+            if not friendly and proc:
+                friendly = self._friendly_app_name(proc)
+        if friendly:
+            self.prompt_window.lbl_title.setText(f"Звонок в {friendly}?")
         else:
             self.prompt_window.lbl_title.setText("Похоже, у вас начался звонок")
+        self.prompt_window.lbl_sub.setText("Возможно, пора начать запись.")
         self._position_prompt()
         self.prompt_window.show()
         self.prompt_window.raise_()
@@ -1463,6 +1477,8 @@ class TrayApplication(QObject):
         mapping = {
             "ms-teams.exe": "Microsoft Teams",
             "teams.exe": "Microsoft Teams",
+            "msteams.exe": "Microsoft Teams",
+            "whatsapp.exe": "WhatsApp",
             "zoom.exe": "Zoom",
             "discord.exe": "Discord",
             "slack.exe": "Slack",

@@ -260,17 +260,11 @@ class AudioRecorder(threading.Thread):
                     peak,
                 )
                 if self.source_mode == "mic":
-                    msg = (
-                        "Очень тихий сигнал с микрофона. "
-                        "Чтобы писать голоса из Teams/Zoom, включите режим Both или Loopback."
-                    )
+                    msg = "Тихий мик. Для звонков — режим Both или Loopback."
                 elif self.source_mode == "both":
-                    msg = "Слабый сигнал. Проверьте микрофон и громкость в звонке."
+                    msg = "Слабый сигнал: проверьте мик и громкость в звонке."
                 else:
-                    msg = (
-                        "Слабый сигнал с компьютера (loopback). "
-                        "Увеличьте громкость динамиков или выберите режим Both."
-                    )
+                    msg = "Слабый loopback: громкость или режим Both."
                 self._emit_status("warning", msg)
 
         self._maybe_log_progress(now)
