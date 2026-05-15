@@ -4,20 +4,21 @@ import sys
 import threading
 import traceback
 
-from PyQt6.QtCore import QSharedMemory, QtMsgType, qInstallMessageHandler
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
+from PyQt6.QtWidgets import QApplication, QMessageBox
 from gui import TrayApplication
-from app_logger import get_logger, setup_logging
+from app_logger import get_logger, log_session_banner, set_session_id, setup_logging
 from platform_factory import create_platform_services
-from platform_runtime import is_windows
+from session_diagnostics import (
+    install_session_diagnostics,
+    new_session_id,
+    read_previous_session,
+    write_session_marker,
+)
+from single_instance import SingleInstanceGuard
 
 
 def _git_short_sha() -> str:
-    """Return the current git short sha, or ``"dev"`` on any failure.
-
-    Subprocess is guarded with a tiny timeout so packaged builds that
-    have no .git/ next to them don't slow startup.
-    """
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         result = subprocess.run(
@@ -33,8 +34,6 @@ def _git_short_sha() -> str:
 
 
 def _install_crash_diagnostics(logger):
-    """Log uncaught exceptions and Qt criticals to help explain sudden exits."""
-
     def _excepthook(exc_type, exc, tb):
         try:
             logger.critical(
@@ -43,6 +42,11 @@ def _install_crash_diagnostics(logger):
                 exc,
                 "".join(traceback.format_exception(exc_type, exc, tb)),
             )
+            for handler in logger.handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
         except Exception:
             pass
         sys.__excepthook__(exc_type, exc, tb)
@@ -62,6 +66,11 @@ def _install_crash_diagnostics(logger):
                     )
                 ),
             )
+            for handler in logger.handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -86,63 +95,90 @@ def _install_crash_diagnostics(logger):
     qInstallMessageHandler(_qt_msg_handler)
 
 
-def _acquire_single_instance_guard(app: QApplication, logger):
-    """Attach a ``QSharedMemory`` child of ``app``, or exit if duplicate.
-
-    ``QSharedMemory`` is a ``QObject`` and must be created only after
-    ``QApplication`` exists. Set ``WIN_REC_ALLOW_MULTI_INSTANCE=1`` to
-    disable this guard (e.g. for parallel automated tests).
-    """
-    if os.environ.get("WIN_REC_ALLOW_MULTI_INSTANCE", "").strip() == "1":
-        return None
-    if not is_windows():
-        return None
-    key = "win-rec-app-single-instance-v1"
-    mem = QSharedMemory(key, app)
-    if mem.attach():
-        mem.detach()
-        logger.warning("app_exit_duplicate_instance | key=%s", key)
-        sys.exit(0)
-    if not mem.create(1):
-        logger.warning(
-            "single_instance_create_failed | err=%s | continuing_without_guard",
-            mem.errorString(),
-        )
-        return None
-    return mem
+def _acquire_single_instance(app: QApplication, logger) -> SingleInstanceGuard | None:
+    guard = SingleInstanceGuard()
+    if guard.try_acquire():
+        return guard
+    logger.warning("app_exit_duplicate_instance | reason=already_running")
+    QMessageBox.warning(
+        None,
+        "win rec app",
+        "Приложение уже запущено.\n\n"
+        "Проверьте иконку в трее (рядом с часами). "
+        "Если его там нет — подождите несколько секунд и запустите снова.",
+    )
+    return None
 
 
 def main():
+    session_id = new_session_id()
+    set_session_id(session_id)
+    previous = read_previous_session()
+
     setup_logging()
     logger = get_logger()
+    log_session_banner(logger, previous)
     _install_crash_diagnostics(logger)
+    install_session_diagnostics(logger, session_id)
+
+    write_session_marker(
+        phase="starting",
+        session_id=session_id,
+        pid=os.getpid(),
+        extra={"version": _git_short_sha()},
+    )
+
     py_version = "{}.{}.{}".format(*sys.version_info[:3])
     logger.info(
-        "app_start | version=%s | platform=%s | python=%s | pid=%s",
+        "app_start | version=%s | platform=%s | python=%s | pid=%s | session=%s",
         _git_short_sha(),
         sys.platform,
         py_version,
         os.getpid(),
+        session_id,
     )
 
     app = QApplication(sys.argv)
-    single_guard = _acquire_single_instance_guard(app, logger)
-    if single_guard is not None:
-        setattr(app, "_win_rec_single_instance_shmem", single_guard)
+    single_guard = _acquire_single_instance(app, logger)
+    if single_guard is None:
+        write_session_marker(
+            phase="duplicate_instance_exit",
+            session_id=session_id,
+            pid=os.getpid(),
+        )
+        return 1
+
     app.setQuitOnLastWindowClosed(False)
-    app.aboutToQuit.connect(
-        lambda: logger.info("app_about_to_quit | reason=qt_event_loop")
-    )
+
+    def _on_about_to_quit():
+        logger.info("app_about_to_quit | reason=qt_event_loop | session=%s", session_id)
+        write_session_marker(
+            phase="qt_about_to_quit",
+            session_id=session_id,
+            pid=os.getpid(),
+        )
+        single_guard.release()
+
+    app.aboutToQuit.connect(_on_about_to_quit)
 
     audio_backend, _, hotkey_service, system_ops = create_platform_services()
-    tray = TrayApplication(
+    TrayApplication(
         app,
         audio_backend=audio_backend,
         hotkey_service=hotkey_service,
         system_ops=system_ops,
     )
 
-    sys.exit(app.exec())
+    write_session_marker(
+        phase="running",
+        session_id=session_id,
+        pid=os.getpid(),
+    )
+
+    exit_code = app.exec()
+    logger.info("app_exec_returned | exit_code=%s | session=%s", exit_code, session_id)
+    return exit_code
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
