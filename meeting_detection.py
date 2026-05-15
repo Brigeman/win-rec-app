@@ -123,10 +123,12 @@ class LoopbackAudioProbe:
                     time.sleep(1.5)
                     continue
 
-                diag("loopback_record_begin", channel="probe", tick=tick)
+                if tick <= 2:
+                    diag("loopback_record_begin", channel="probe", tick=tick)
                 with loopback.recorder(samplerate=44100, channels=2) as rec:
                     data = rec.record(numframes=1024)
-                diag("loopback_record_done", channel="probe", tick=tick)
+                if tick <= 2:
+                    diag("loopback_record_done", channel="probe", tick=tick)
                 self._loopback_failures = 0
                 if data is None or len(data) == 0:
                     rms = 0.0

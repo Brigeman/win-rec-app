@@ -30,13 +30,17 @@ from windows_process_utils import clear_parent_cache, process_name_for_pid
 logger = get_logger()
 
 
-def uia_probe_disabled() -> bool:
-    """Emergency off-switch only (``WINREC_DISABLE_UIA=1``). UIA is on by default."""
-    return os.environ.get("WINREC_DISABLE_UIA", "").strip().lower() in (
+def uia_probe_enabled() -> bool:
+    """UIA is opt-in only — in-process UIA causes native access violations on some PCs."""
+    return os.environ.get("WINREC_ENABLE_UIA", "").strip().lower() in (
         "1",
         "true",
         "yes",
     )
+
+
+def uia_probe_disabled() -> bool:
+    return not uia_probe_enabled()
 
 
 @dataclass
@@ -82,7 +86,8 @@ class WindowsDesktopCallUiaProbe:
         self._disabled_until_ts = 0.0
 
     def start(self) -> None:
-        if not self._windows or uia_probe_disabled():
+        if not self._windows or not uia_probe_enabled():
+            logger.info("desktop_uia_probe_skip | reason=disabled_by_default")
             return
         if self._thread and self._thread.is_alive():
             return
@@ -295,15 +300,16 @@ class WindowsDesktopCallUiaProbe:
 
 
 def create_desktop_probe():
-    """UIA probe by default; title-only fallback if UIA disabled or import fails."""
+    """Title probe by default; UIA only when ``WINREC_ENABLE_UIA=1``."""
     if not is_windows():
         return NullDesktopCallUiaProbe()
-    if uia_probe_disabled():
+    if not uia_probe_enabled():
         from windows_desktop_title_probe import WindowsDesktopTitleProbe
 
-        logger.info("desktop_probe_factory | mode=title | reason=WINREC_DISABLE_UIA")
+        logger.info("desktop_probe_factory | mode=title | reason=WINREC_ENABLE_UIA_not_set")
         return WindowsDesktopTitleProbe()
     try:
+        logger.info("desktop_probe_factory | mode=uia | reason=WINREC_ENABLE_UIA=1")
         return WindowsDesktopCallUiaProbe()
     except Exception:
         logger.exception("desktop_probe_factory | mode=uia_failed_using_title")

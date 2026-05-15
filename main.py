@@ -133,12 +133,20 @@ def main():
 
     py_version = "{}.{}.{}".format(*sys.version_info[:3])
     logger.info(
-        "app_start | version=%s | platform=%s | python=%s | pid=%s | session=%s",
+        "app_start | version=%s | platform=%s | python=%s | pid=%s | session=%s | "
+        "uia=%s",
         _git_short_sha(),
         sys.platform,
         py_version,
         os.getpid(),
         session_id,
+        os.environ.get("WINREC_ENABLE_UIA", ""),
+    )
+    diag(
+        "app_start",
+        channel="startup",
+        version=_git_short_sha(),
+        uia_env=os.environ.get("WINREC_ENABLE_UIA", ""),
     )
 
     diag("before_qapplication", channel="startup")

@@ -12,6 +12,7 @@ import time
 from typing import List, Tuple
 
 from app_logger import get_logger
+from diagnostic_log import diag
 from desktop_call_profiles import (
     PROFILE_BY_APP_ID,
     meets_window_gate,
@@ -55,7 +56,8 @@ class WindowsDesktopTitleProbe:
             target=self._run, name="desktop-title-probe", daemon=True
         )
         self._thread.start()
-        logger.info("desktop_title_probe_start | thread=%s", self._thread.name)
+        logger.info("desktop_title_probe_start | thread=%s | mode=title_default", self._thread.name)
+        diag("title_thread_start", channel="threads", delay_s=os.environ.get("WINREC_TITLE_PROBE_START_DELAY", "5"))
 
     def stop(self) -> None:
         self._stop_event.set()
