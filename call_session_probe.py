@@ -141,6 +141,11 @@ class WindowsCallSessionProbe:
     # --- internals ----------------------------------------------------
 
     def _run(self) -> None:
+        # Let Qt paint the tray/bar before Core Audio COM work (can marshal
+        # into the GUI STA and freeze the app on some machines).
+        startup_delay = float(os.environ.get("WINREC_PROBE_START_DELAY", "4"))
+        if startup_delay > 0:
+            time.sleep(startup_delay)
         if not self._bootstrap_in_probe_thread():
             with self._lock:
                 self._snapshot = CallSessionSnapshot(

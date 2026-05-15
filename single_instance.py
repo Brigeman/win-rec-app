@@ -9,6 +9,7 @@ allows replacing a hung instance that still holds the mutex.
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 
 from app_logger import get_logger
@@ -51,7 +52,7 @@ class SingleInstanceGuard:
             return self._try_acquire_windows_mutex()
         return self._try_acquire_pid_file()
 
-    def _try_acquire_windows_mutex(self, allow_retry: bool = True) -> bool:
+    def _try_acquire_windows_mutex(self, allow_replace: bool = True) -> bool:
         try:
             import ctypes
 
@@ -65,18 +66,38 @@ class SingleInstanceGuard:
             return self._try_acquire_pid_file()
         if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
             kernel32.CloseHandle(handle)
-            if allow_retry and self._should_replace_existing_owner():
+            if allow_replace and self._should_replace_existing_owner():
                 owner = self._existing_owner_pid()
-                self._terminate_pid(owner)
                 logger.warning(
                     "single_instance_replace | reason=stale_or_dead | pid=%s",
                     owner,
                 )
-                return self._try_acquire_windows_mutex(allow_retry=False)
+                exited = self._terminate_and_wait(owner, timeout=5.0)
+                if not exited:
+                    logger.warning(
+                        "single_instance_replace_failed | pid=%s | still_alive=1",
+                        owner,
+                    )
+                return self._try_acquire_windows_mutex(allow_replace=False)
             return False
         self._mutex_handle = int(handle)
         self._write_pid_lock()
         return True
+
+    def _terminate_and_wait(self, pid: int, timeout: float = 5.0) -> bool:
+        if pid <= 0:
+            return True
+        self._terminate_pid(pid)
+        deadline = time.monotonic() + max(0.5, timeout)
+        while time.monotonic() < deadline:
+            if not self._pid_is_alive(pid):
+                logger.info("single_instance | owner_exited | pid=%s", pid)
+                return True
+            time.sleep(0.15)
+        alive = self._pid_is_alive(pid)
+        if alive:
+            logger.warning("single_instance | owner_still_alive | pid=%s", pid)
+        return not alive
 
     def _existing_owner_pid(self) -> int:
         pid = heartbeat_owner_pid()

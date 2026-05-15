@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QFrame,
-    QGraphicsDropShadowEffect,
     QSizePolicy,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -287,11 +286,8 @@ class RecorderBarWindow(QWidget):
         panel_layout.setSpacing(6)
         panel.setLayout(panel_layout)
 
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(16)
-        shadow.setOffset(0, 4)
-        shadow.setColor(QColor(0, 0, 0, 110))
-        panel.setGraphicsEffect(shadow)
+        # Drop shadow disabled: QGraphicsDropShadowEffect + translucent
+        # frameless windows have frozen the whole app on some Windows GPUs.
 
         self.btn_rec = QPushButton("REC")
         self.btn_stop = QPushButton("STOP")
@@ -998,11 +994,10 @@ class TrayApplication(QObject):
 
         self.settings_window = SettingsWindow(audio_backend=self.audio_backend)
         self.settings_window.settings_saved.connect(self.register_hotkeys)
-        self.register_hotkeys()
-        self.detector.start()
-        self.detector_timer.start()
+        self._background_started = False
         self._heartbeat_timer.start()
         self._pulse_heartbeat()
+        QTimer.singleShot(3500, self._start_background_services)
         self.tray_icon.showMessage(
             "Ready",
             "Floating panel is visible. Use HIDE to keep it only in tray.",
@@ -1014,6 +1009,22 @@ class TrayApplication(QObject):
 
     def _pulse_heartbeat(self) -> None:
         write_heartbeat(session_id=get_session_id())
+
+    def _start_background_services(self) -> None:
+        if self._background_started:
+            return
+        self._background_started = True
+        logger.info("deferred_startup | phase=hotkeys_detectors")
+        try:
+            self.register_hotkeys()
+        except Exception:
+            logger.exception("deferred_startup | hotkeys_failed")
+        try:
+            self.detector.start()
+        except Exception:
+            logger.exception("deferred_startup | detector_start_failed")
+        if not self.detector_timer.isActive():
+            self.detector_timer.start()
 
     def _log_startup_summary(self) -> None:
         """Emit a single info banner describing the active configuration."""

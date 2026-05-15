@@ -24,6 +24,14 @@ def create_call_probe() -> CallProbe:
 
     On non-Windows hosts we return :class:`NullCallProbe`.
     """
+    import os
+
+    if os.environ.get("WINREC_DISABLE_CORE_AUDIO_PROBE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return NullCallProbe()
     if not is_windows():
         return NullCallProbe()
     try:

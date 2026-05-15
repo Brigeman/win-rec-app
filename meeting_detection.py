@@ -98,6 +98,13 @@ class LoopbackAudioProbe:
             )
 
     def _run(self):
+        # Opening loopback capture immediately at startup has frozen the UI
+        # on some Realtek drivers; defer until the shell is responsive.
+        import os
+
+        startup_delay = float(os.environ.get("WINREC_LOOPBACK_START_DELAY", "4"))
+        if startup_delay > 0:
+            time.sleep(startup_delay)
         while not self._stop_event.is_set():
             try:
                 loopback = self._default_loopback_device()
