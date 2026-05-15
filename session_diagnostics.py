@@ -10,6 +10,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
+from diagnostic_log import diag
 from platform_runtime import app_support_dir, logs_dir
 
 _MARKER_FILE = "last_session.json"
@@ -50,6 +51,7 @@ def write_session_marker(
     }
     if extra:
         payload.update(extra)
+    diag("session_marker", channel="startup", phase=phase, pid=pid)
     try:
         os.makedirs(os.path.dirname(_marker_path()) or ".", exist_ok=True)
         with open(_marker_path(), "w", encoding="utf-8") as f:

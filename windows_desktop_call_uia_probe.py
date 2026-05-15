@@ -23,6 +23,8 @@ from desktop_call_profiles import (
 from detector_trace import detector_trace_enabled
 from detection_rules import DEFAULT_UNIVERSAL_RULES, UniversalCallRules
 from platform_runtime import is_windows
+from diagnostic_log import diag, diag_exception
+from windows_com_gate import com_gate
 from windows_process_utils import clear_parent_cache, process_name_for_pid
 
 logger = get_logger()
@@ -110,27 +112,45 @@ class WindowsDesktopCallUiaProbe:
             )
 
     def _run_thread(self) -> None:
+        diag(
+            "uia_thread_start",
+            channel="threads",
+            delay_s=os.environ.get("WINREC_UIA_PROBE_START_DELAY", "5"),
+        )
         startup_delay = float(os.environ.get("WINREC_UIA_PROBE_START_DELAY", "5"))
         if startup_delay > 0:
             time.sleep(startup_delay)
         try:
             import uiautomation as auto  # type: ignore
-        except Exception:
+        except Exception as exc:
             logger.exception("desktop_uia_probe_import_failed")
+            diag_exception("uia_import_failed", exc)
             return
 
         try:
             with auto.UIAutomationInitializerInThread():
+                diag("uia_initializer_ready", channel="probe")
+                tick = 0
                 while not self._stop_event.is_set():
+                    tick += 1
                     if time.monotonic() < self._disabled_until_ts:
                         self._stop_event.wait(self.interval_seconds)
                         continue
                     try:
                         clear_parent_cache()
-                        snap = self._scan_once()
+                        with com_gate("uia_scan"):
+                            snap = self._scan_once()
                         with self._lock:
                             self._snapshot = snap
                         self._consecutive_failures = 0
+                        if tick <= 3 or tick % 30 == 0:
+                            diag(
+                                "uia_tick",
+                                channel="probe",
+                                tick=tick,
+                                score=snap.score,
+                                app_id=snap.app_id or "",
+                            )
                         if detector_trace_enabled() and snap.score > 0:
                             logger.info(
                                 "uia_probe | app=%s | score=%s | matched=%s | pid=%s",
@@ -139,7 +159,8 @@ class WindowsDesktopCallUiaProbe:
                                 ",".join(snap.matched[:8]),
                                 snap.pid or "",
                             )
-                    except Exception:
+                    except Exception as exc:
+                        diag_exception("uia_tick_failed", exc, tick=tick)
                         self._consecutive_failures += 1
                         now_log = time.monotonic()
                         if (

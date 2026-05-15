@@ -8,6 +8,7 @@ import numpy as np
 
 from audio_backends import AudioBackend, create_audio_backend
 from app_logger import get_logger
+from diagnostic_log import diag, diag_exception
 from detection_rules import DEFAULT_RULES, DetectionRuleSet
 from platform_factory import create_presence_probe
 from platform_runtime import is_macos
@@ -71,6 +72,8 @@ class LoopbackAudioProbe:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._activity = AudioActivity()
+        self._cached_loopback = None
+        self._loopback_failures = 0
 
     def start(self):
         if is_macos():
@@ -98,25 +101,33 @@ class LoopbackAudioProbe:
             )
 
     def _run(self):
-        # Opening loopback capture immediately at startup has frozen the UI
-        # on some Realtek drivers; defer until the shell is responsive.
         import os
 
+        diag(
+            "loopback_thread_start",
+            channel="threads",
+            delay_s=os.environ.get("WINREC_LOOPBACK_START_DELAY", "4"),
+        )
         startup_delay = float(os.environ.get("WINREC_LOOPBACK_START_DELAY", "4"))
         if startup_delay > 0:
             time.sleep(startup_delay)
+        tick = 0
         while not self._stop_event.is_set():
+            tick += 1
             try:
                 loopback = self._default_loopback_device()
                 if not loopback:
+                    if tick <= 2:
+                        diag("loopback_device_missing", channel="probe", tick=tick)
                     self._store(0.0, 0.0, 0.0)
                     time.sleep(1.5)
                     continue
 
-                # Open the device briefly each tick — holding loopback open
-                # continuously has crashed some Realtek drivers (access violation).
+                diag("loopback_record_begin", channel="probe", tick=tick)
                 with loopback.recorder(samplerate=44100, channels=2) as rec:
                     data = rec.record(numframes=1024)
+                diag("loopback_record_done", channel="probe", tick=tick)
+                self._loopback_failures = 0
                 if data is None or len(data) == 0:
                     rms = 0.0
                     peak = 0.0
@@ -134,8 +145,25 @@ class LoopbackAudioProbe:
                 else:
                     sustained = max(0.0, prev.sustained_seconds - delta)
                 self._store(rms, peak, sustained)
+                if tick <= 3 or tick % 30 == 0:
+                    diag(
+                        "loopback_tick",
+                        channel="probe",
+                        tick=tick,
+                        rms=round(rms, 4),
+                        peak=round(peak, 4),
+                        sustain=round(sustained, 2),
+                    )
                 time.sleep(self.interval_seconds)
-            except Exception:
+            except Exception as exc:
+                self._loopback_failures += 1
+                self._cached_loopback = None
+                diag_exception(
+                    "loopback_tick_failed",
+                    exc,
+                    tick=tick,
+                    failures=self._loopback_failures,
+                )
                 logger.exception("Loopback audio probe error.")
                 self._store(0.0, 0.0, 0.0)
                 time.sleep(2.0)
@@ -150,9 +178,14 @@ class LoopbackAudioProbe:
             )
 
     def _default_loopback_device(self):
+        if self._cached_loopback is not None:
+            return self._cached_loopback
         try:
-            return self.audio_backend.get_default_loopback()
-        except Exception:
+            self._cached_loopback = self.audio_backend.get_default_loopback()
+            diag("loopback_device_resolved", channel="probe")
+            return self._cached_loopback
+        except Exception as exc:
+            diag_exception("loopback_device_resolve_failed", exc)
             return None
 
 

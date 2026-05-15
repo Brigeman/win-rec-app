@@ -95,11 +95,27 @@ def setup_logging() -> logging.Logger:
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-    logger.info(
-        "logger_ready | level=%s | file=%s | rotation=5MB,5 | append=1",
-        logging.getLevelName(level),
-        _mask_home(log_file),
-    )
+    try:
+        from diagnostic_log import diagnostic_log_paths, setup_diagnostic_loggers
+
+        setup_diagnostic_loggers()
+        paths = diagnostic_log_paths()
+        logger.info(
+            "logger_ready | level=%s | app=%s | startup=%s | probe=%s | "
+            "lifecycle=%s | crash=%s",
+            logging.getLevelName(level),
+            _mask_home(paths.get("app", log_file)),
+            _mask_home(paths.get("startup", "")),
+            _mask_home(paths.get("probe", "")),
+            _mask_home(paths.get("lifecycle", "")),
+            _mask_home(paths.get("crash", "")),
+        )
+    except Exception:
+        logger.info(
+            "logger_ready | level=%s | file=%s | rotation=5MB,5 | append=1",
+            logging.getLevelName(level),
+            _mask_home(log_file),
+        )
     return logger
 
 

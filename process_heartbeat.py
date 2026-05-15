@@ -9,6 +9,9 @@ from typing import Any, Dict, Optional
 
 from platform_runtime import app_support_dir
 
+# Heartbeat writes are frequent; log to lifecycle only at DEBUG via diag sparingly.
+_heartbeat_log_counter = 0
+
 _HEARTBEAT_NAME = "heartbeat.json"
 _STALE_SECONDS = 12.0
 
@@ -18,6 +21,19 @@ def _path() -> str:
 
 
 def write_heartbeat(*, session_id: str = "") -> None:
+    global _heartbeat_log_counter
+    _heartbeat_log_counter += 1
+    if _heartbeat_log_counter in (1, 2, 12):
+        try:
+            from diagnostic_log import diag
+
+            diag(
+                "heartbeat_write",
+                channel="startup",
+                count=_heartbeat_log_counter,
+            )
+        except Exception:
+            pass
     payload = {
         "pid": os.getpid(),
         "ts": time.time(),

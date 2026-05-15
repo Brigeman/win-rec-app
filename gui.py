@@ -36,6 +36,7 @@ from app_logger import (
     get_logger,
     get_session_id,
 )
+from diagnostic_log import diag, diag_exception
 from process_heartbeat import write_heartbeat
 from audio_recorder import AudioRecorder, get_devices
 from clipboard_utils import copy_file_to_clipboard
@@ -976,6 +977,7 @@ class TrayApplication(QObject):
         self.bar_window.hide_clicked.connect(self.hide_bar)
         self.bar_window.settings_clicked.connect(self.open_settings)
         self._position_bar()
+        diag("tray_bar_show", channel="startup")
         self.bar_window.show()
 
         self.prompt_window = MeetingPromptWindow()
@@ -991,6 +993,7 @@ class TrayApplication(QObject):
         self.tray_icon.activated.connect(self.on_tray_activated)
         self.build_menu()
         self.tray_icon.show()
+        diag("tray_icon_show", channel="startup")
 
         self.settings_window = SettingsWindow(audio_backend=self.audio_backend)
         self.settings_window.settings_saved.connect(self.register_hotkeys)
@@ -1015,16 +1018,25 @@ class TrayApplication(QObject):
             return
         self._background_started = True
         logger.info("deferred_startup | phase=hotkeys_detectors")
+        diag("deferred_startup_begin", channel="startup")
         try:
+            diag("hotkeys_register_begin", channel="startup")
             self.register_hotkeys()
-        except Exception:
+            diag("hotkeys_register_done", channel="startup")
+        except Exception as exc:
             logger.exception("deferred_startup | hotkeys_failed")
+            diag("hotkeys_register_failed", channel="startup", level="error", err=str(exc))
         try:
+            diag("detector_start_begin", channel="startup")
             self.detector.start()
-        except Exception:
+            diag("detector_start_done", channel="startup")
+        except Exception as exc:
             logger.exception("deferred_startup | detector_start_failed")
+            diag("detector_start_failed", channel="startup", level="error", err=str(exc))
         if not self.detector_timer.isActive():
             self.detector_timer.start()
+            diag("detector_timer_start", channel="startup")
+        diag("deferred_startup_done", channel="startup")
 
     def _log_startup_summary(self) -> None:
         """Emit a single info banner describing the active configuration."""
@@ -1311,6 +1323,11 @@ class TrayApplication(QObject):
             self._detector_eval_running = True
 
         is_recording = bool(self.recorder and self.recorder.is_alive())
+        diag(
+            "detector_eval_scheduled",
+            channel="probe",
+            is_recording=int(bool(is_recording)),
+        )
         threading.Thread(
             target=self._evaluate_meeting_detection_worker,
             args=(is_recording,),
@@ -1320,9 +1337,17 @@ class TrayApplication(QObject):
 
     def _evaluate_meeting_detection_worker(self, is_recording: bool):
         try:
+            diag("detector_eval_begin", channel="probe", is_recording=int(bool(is_recording)))
             decision = self.detector.evaluate(is_recording=is_recording, mic_rms=0.0)
+            diag(
+                "detector_eval_done",
+                channel="probe",
+                reason=decision.reason or "",
+                score=decision.score,
+            )
             self.signals.detection_decision.emit(decision)
-        except Exception:
+        except Exception as exc:
+            diag_exception("detector_eval_failed", exc)
             logger.exception("Meeting detection evaluation failed.")
         finally:
             with self._detector_eval_lock:

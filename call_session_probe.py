@@ -18,7 +18,9 @@ from typing import Dict, Optional, Set
 from app_logger import get_logger
 from call_probe import CallPidState, CallSessionSnapshot
 from detector_trace import detector_trace_enabled
+from diagnostic_log import diag, diag_exception
 from platform_runtime import is_windows
+from windows_com_gate import com_gate
 from windows_process_utils import process_name_for_pid
 
 logger = get_logger()
@@ -141,25 +143,43 @@ class WindowsCallSessionProbe:
     # --- internals ----------------------------------------------------
 
     def _run(self) -> None:
-        # Let Qt paint the tray/bar before Core Audio COM work (can marshal
-        # into the GUI STA and freeze the app on some machines).
+        diag(
+            "core_audio_thread_start",
+            channel="threads",
+            delay_s=os.environ.get("WINREC_PROBE_START_DELAY", "4"),
+        )
         startup_delay = float(os.environ.get("WINREC_PROBE_START_DELAY", "4"))
         if startup_delay > 0:
             time.sleep(startup_delay)
+        diag("core_audio_bootstrap_begin", channel="probe")
         if not self._bootstrap_in_probe_thread():
+            diag("core_audio_bootstrap_failed", channel="probe", level="warning")
             with self._lock:
                 self._snapshot = CallSessionSnapshot(
                     timestamp=time.time(), available=False
                 )
             return
+        diag("core_audio_bootstrap_ok", channel="probe")
 
         try:
+            tick = 0
             while not self._stop_event.is_set():
+                tick += 1
                 try:
-                    snap = self._collect_snapshot()
+                    with com_gate("core_audio_collect"):
+                        snap = self._collect_snapshot()
                     with self._lock:
                         self._snapshot = snap
-                except Exception:
+                    if tick <= 3 or tick % 30 == 0:
+                        diag(
+                            "core_audio_tick",
+                            channel="probe",
+                            tick=tick,
+                            available=int(bool(snap.available)),
+                            pid_count=len(snap.active_call_pids),
+                        )
+                except Exception as exc:
+                    diag_exception("core_audio_tick_failed", exc, tick=tick)
                     logger.exception("CallSessionProbe iteration failed.")
                     with self._lock:
                         self._snapshot = CallSessionSnapshot(

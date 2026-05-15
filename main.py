@@ -15,6 +15,7 @@ from session_diagnostics import (
     read_previous_session,
     write_session_marker,
 )
+from diagnostic_log import diag
 from single_instance import SingleInstanceGuard
 
 
@@ -118,6 +119,7 @@ def main():
 
     setup_logging()
     logger = get_logger()
+    diag("main_enter", channel="startup")
     log_session_banner(logger, previous)
     _install_crash_diagnostics(logger)
     install_session_diagnostics(logger, session_id)
@@ -139,9 +141,12 @@ def main():
         session_id,
     )
 
+    diag("before_qapplication", channel="startup")
     app = QApplication(sys.argv)
+    diag("after_qapplication", channel="startup")
     single_guard = _acquire_single_instance(app, logger)
     if single_guard is None:
+        diag("exit_duplicate_instance", channel="startup", level="warning")
         write_session_marker(
             phase="duplicate_instance_exit",
             session_id=session_id,
@@ -162,6 +167,7 @@ def main():
 
     app.aboutToQuit.connect(_on_about_to_quit)
 
+    diag("before_tray_application", channel="startup")
     audio_backend, _, hotkey_service, system_ops = create_platform_services()
     TrayApplication(
         app,
@@ -175,8 +181,10 @@ def main():
         session_id=session_id,
         pid=os.getpid(),
     )
+    diag("qt_event_loop_start", channel="startup", phase="running")
 
     exit_code = app.exec()
+    diag("qt_event_loop_end", channel="startup", exit_code=exit_code)
     logger.info("app_exec_returned | exit_code=%s | session=%s", exit_code, session_id)
     return exit_code
 

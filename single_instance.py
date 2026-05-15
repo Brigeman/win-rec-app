@@ -14,6 +14,7 @@ from typing import Optional
 
 from app_logger import get_logger
 from platform_runtime import app_support_dir, is_windows
+from diagnostic_log import diag
 from process_heartbeat import heartbeat_owner_pid, is_heartbeat_stale
 
 logger = get_logger()
@@ -72,7 +73,19 @@ class SingleInstanceGuard:
                     "single_instance_replace | reason=stale_or_dead | pid=%s",
                     owner,
                 )
+                diag(
+                    "single_instance_replace",
+                    channel="startup",
+                    level="warning",
+                    owner_pid=owner,
+                )
                 exited = self._terminate_and_wait(owner, timeout=5.0)
+                diag(
+                    "single_instance_replace_result",
+                    channel="startup",
+                    owner_pid=owner,
+                    exited=int(bool(exited)),
+                )
                 if not exited:
                     logger.warning(
                         "single_instance_replace_failed | pid=%s | still_alive=1",
