@@ -31,7 +31,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from audio_backends import AudioBackend, create_audio_backend
-from app_logger import _mask_home, configure_output_folder_logging, get_logger
+from app_logger import (
+    _mask_home,
+    configure_output_folder_logging,
+    get_logger,
+    get_session_id,
+)
+from process_heartbeat import write_heartbeat
 from audio_recorder import AudioRecorder, get_devices
 from clipboard_utils import copy_file_to_clipboard
 from detector_router import create_detector, resolve_strategy
@@ -938,6 +944,9 @@ class TrayApplication(QObject):
         self.detector_timer = QTimer(self)
         self.detector_timer.setInterval(1500)
         self.detector_timer.timeout.connect(self.evaluate_meeting_detection)
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(5000)
+        self._heartbeat_timer.timeout.connect(self._pulse_heartbeat)
         self.prompt_autohide_timer = QTimer(self)
         self.prompt_autohide_timer.setSingleShot(True)
         self.prompt_autohide_timer.setInterval(PROMPT_AUTOHIDE_MS)
@@ -992,6 +1001,8 @@ class TrayApplication(QObject):
         self.register_hotkeys()
         self.detector.start()
         self.detector_timer.start()
+        self._heartbeat_timer.start()
+        self._pulse_heartbeat()
         self.tray_icon.showMessage(
             "Ready",
             "Floating panel is visible. Use HIDE to keep it only in tray.",
@@ -1000,6 +1011,9 @@ class TrayApplication(QObject):
         )
         self._maybe_show_macos_hotkey_hint()
         self._log_startup_summary()
+
+    def _pulse_heartbeat(self) -> None:
+        write_heartbeat(session_id=get_session_id())
 
     def _log_startup_summary(self) -> None:
         """Emit a single info banner describing the active configuration."""

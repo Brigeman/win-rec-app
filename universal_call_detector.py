@@ -74,15 +74,9 @@ class UniversalCallDetector:
     @staticmethod
     def _create_desktop_uia_probe():
         try:
-            from platform_runtime import is_windows
+            from windows_desktop_title_probe import create_desktop_probe
 
-            if not is_windows():
-                from windows_desktop_call_uia_probe import NullDesktopCallUiaProbe
-
-                return NullDesktopCallUiaProbe()
-            from windows_desktop_call_uia_probe import WindowsDesktopCallUiaProbe
-
-            return WindowsDesktopCallUiaProbe()
+            return create_desktop_probe()
         except Exception:
             from windows_desktop_call_uia_probe import NullDesktopCallUiaProbe
 

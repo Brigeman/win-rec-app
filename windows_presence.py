@@ -1,4 +1,5 @@
 import ctypes
+import time
 from typing import Optional, Set
 
 try:
@@ -10,6 +11,9 @@ from presence_probe import ForegroundWindowInfo, PresenceProbe, PresenceSnapshot
 
 
 class WindowsPresenceProbe(PresenceProbe):
+    _process_cache_ts: float = 0.0
+    _process_cache_names: Set[str] = set()
+
     def snapshot(self) -> PresenceSnapshot:
         running = self._running_processes()
         fg = self._foreground_window_info()
@@ -18,12 +22,17 @@ class WindowsPresenceProbe(PresenceProbe):
     def _running_processes(self) -> Set[str]:
         if psutil is None:
             return set()
+        now = time.monotonic()
+        if now - WindowsPresenceProbe._process_cache_ts < 10.0:
+            return set(WindowsPresenceProbe._process_cache_names)
         names: Set[str] = set()
         for proc in psutil.process_iter(["name"]):
             name = (proc.info.get("name") or "").lower()
             if name:
                 names.add(name)
-        return names
+        WindowsPresenceProbe._process_cache_ts = now
+        WindowsPresenceProbe._process_cache_names = names
+        return set(names)
 
     def _foreground_window_info(self) -> ForegroundWindowInfo:
         try:

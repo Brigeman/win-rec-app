@@ -2,7 +2,8 @@
 
 ``QSharedMemory`` can outlive the process after a hard exit; the next
 launch then attaches and immediately quits. A Windows named mutex is
-released by the OS when the owning process dies.
+released by the OS when the owning process dies. A stale heartbeat
+allows replacing a hung instance that still holds the mutex.
 """
 
 from __future__ import annotations
@@ -10,7 +11,11 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from app_logger import get_logger
 from platform_runtime import app_support_dir, is_windows
+from process_heartbeat import heartbeat_owner_pid, is_heartbeat_stale
+
+logger = get_logger()
 
 _MUTEX_NAME = "Global\\win-rec-app-single-instance-v2"
 _PID_LOCK_NAME = "single_instance.pid"
@@ -29,6 +34,15 @@ class SingleInstanceGuard:
                 f.write(str(os.getpid()))
         except Exception:
             pass
+
+    def _read_pid_lock(self) -> int:
+        try:
+            if not os.path.exists(self._pid_lock_path):
+                return 0
+            with open(self._pid_lock_path, "r", encoding="utf-8") as f:
+                return int((f.read() or "").strip() or "0")
+        except Exception:
+            return 0
 
     def try_acquire(self) -> bool:
         if os.environ.get("WIN_REC_ALLOW_MULTI_INSTANCE", "").strip() == "1":
@@ -51,36 +65,59 @@ class SingleInstanceGuard:
             return self._try_acquire_pid_file()
         if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
             kernel32.CloseHandle(handle)
-            if allow_retry and self._mutex_owner_is_dead():
+            if allow_retry and self._should_replace_existing_owner():
+                owner = self._existing_owner_pid()
+                self._terminate_pid(owner)
+                logger.warning(
+                    "single_instance_replace | reason=stale_or_dead | pid=%s",
+                    owner,
+                )
                 return self._try_acquire_windows_mutex(allow_retry=False)
             return False
         self._mutex_handle = int(handle)
         self._write_pid_lock()
         return True
 
-    def _mutex_owner_is_dead(self) -> bool:
-        """If the pid lock names a process that exited, retry mutex once."""
+    def _existing_owner_pid(self) -> int:
+        pid = heartbeat_owner_pid()
+        if pid > 0:
+            return pid
+        return self._read_pid_lock()
+
+    def _should_replace_existing_owner(self) -> bool:
+        owner = self._existing_owner_pid()
+        if owner <= 0 or owner == os.getpid():
+            return False
+        if not self._pid_is_alive(owner):
+            return True
+        return is_heartbeat_stale()
+
+    @staticmethod
+    def _terminate_pid(pid: int) -> None:
+        if pid <= 0:
+            return
         try:
-            if not os.path.exists(self._pid_lock_path):
-                return False
-            with open(self._pid_lock_path, "r", encoding="utf-8") as f:
-                old_pid = int((f.read() or "").strip() or "0")
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            access = 0x0001  # PROCESS_TERMINATE
+            handle = kernel32.OpenProcess(access, False, int(pid))
+            if not handle:
+                return
+            try:
+                kernel32.TerminateProcess(handle, 1)
+            finally:
+                kernel32.CloseHandle(handle)
         except Exception:
-            return False
-        if old_pid <= 0 or old_pid == os.getpid():
-            return False
-        return not self._pid_is_alive(old_pid)
+            pass
 
     def _try_acquire_pid_file(self) -> bool:
         try:
-            if os.path.exists(self._pid_lock_path):
-                try:
-                    with open(self._pid_lock_path, "r", encoding="utf-8") as f:
-                        old_pid = int((f.read() or "").strip() or "0")
-                except Exception:
-                    old_pid = 0
-                if old_pid and self._pid_is_alive(old_pid):
+            old_pid = self._read_pid_lock()
+            if old_pid and self._pid_is_alive(old_pid):
+                if not is_heartbeat_stale():
                     return False
+                self._terminate_pid(old_pid)
             with open(self._pid_lock_path, "w", encoding="utf-8") as f:
                 f.write(str(os.getpid()))
             return True
