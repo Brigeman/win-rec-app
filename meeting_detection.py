@@ -113,33 +113,28 @@ class LoopbackAudioProbe:
                     time.sleep(1.5)
                     continue
 
+                # Open the device briefly each tick — holding loopback open
+                # continuously has crashed some Realtek drivers (access violation).
                 with loopback.recorder(samplerate=44100, channels=2) as rec:
-                    sustained = 0.0
-                    # Track wall-clock delta between iterations so sustained
-                    # time reflects real elapsed time even if record() or
-                    # sleep() drift (or the thread stalls briefly).
-                    last_iter_ts = time.monotonic()
-                    while not self._stop_event.is_set():
-                        data = rec.record(numframes=2048)
-                        if data is None or len(data) == 0:
-                            rms = 0.0
-                            peak = 0.0
-                        else:
-                            abs_data = np.abs(data)
-                            peak = float(np.max(abs_data))
-                            rms = float(np.sqrt(np.mean(np.square(data))))
-                        now_ts = time.monotonic()
-                        # Clamp delta to [0, interval*2] so a long stall doesn't
-                        # produce a huge jump in sustained seconds.
-                        raw_delta = now_ts - last_iter_ts
-                        delta = max(0.0, min(self.interval_seconds * 2.0, raw_delta))
-                        last_iter_ts = now_ts
-                        if rms >= self.rules.audio_rms_medium or peak >= self.rules.audio_peak_medium:
-                            sustained += delta
-                        else:
-                            sustained = max(0.0, sustained - delta)
-                        self._store(rms, peak, sustained)
-                        time.sleep(self.interval_seconds)
+                    data = rec.record(numframes=1024)
+                if data is None or len(data) == 0:
+                    rms = 0.0
+                    peak = 0.0
+                else:
+                    abs_data = np.abs(data)
+                    peak = float(np.max(abs_data))
+                    rms = float(np.sqrt(np.mean(np.square(data))))
+                prev = self.get_activity()
+                delta = self.interval_seconds
+                if (
+                    rms >= self.rules.audio_rms_medium
+                    or peak >= self.rules.audio_peak_medium
+                ):
+                    sustained = prev.sustained_seconds + delta
+                else:
+                    sustained = max(0.0, prev.sustained_seconds - delta)
+                self._store(rms, peak, sustained)
+                time.sleep(self.interval_seconds)
             except Exception:
                 logger.exception("Loopback audio probe error.")
                 self._store(0.0, 0.0, 0.0)

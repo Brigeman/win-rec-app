@@ -8,6 +8,8 @@ except Exception:  # pragma: no cover - available in packaged/runtime envs
     psutil = None
 
 from presence_probe import ForegroundWindowInfo, PresenceProbe, PresenceSnapshot
+from platform_runtime import is_windows
+from windows_process_utils import process_name_for_pid
 
 
 class WindowsPresenceProbe(PresenceProbe):
@@ -57,6 +59,9 @@ class WindowsPresenceProbe(PresenceProbe):
     def _process_name_by_pid(pid: int) -> Optional[str]:
         if not pid:
             return None
+        if is_windows():
+            name = process_name_for_pid(pid)
+            return name or None
         try:
             if psutil is None:
                 return None

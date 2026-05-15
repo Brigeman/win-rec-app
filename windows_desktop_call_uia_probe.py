@@ -1,9 +1,8 @@
 """Windows desktop call UI probe (UI Automation + app profiles).
 
-UIA/COM must run on the same thread as Core Audio (``WindowsCallSessionProbe``).
-A dedicated UIA thread racing pycaw/comtypes caused access violations and a
-frozen tray (mutex still held). ``tick()`` is invoked from the audio probe loop;
-``start()``/``stop()`` are lifecycle no-ops when inline mode is active.
+UIA runs on a **dedicated** background thread with ``UIAutomationInitializerInThread``.
+It must never share a thread with pycaw/comtypes (``WindowsCallSessionProbe``) or
+call psutil during scans — use :mod:`windows_process_utils` for process names.
 """
 
 from __future__ import annotations
@@ -24,13 +23,18 @@ from desktop_call_profiles import (
 from detector_trace import detector_trace_enabled
 from detection_rules import DEFAULT_UNIVERSAL_RULES, UniversalCallRules
 from platform_runtime import is_windows
-from windows_process_utils import process_name_for_pid
+from windows_process_utils import clear_parent_cache, process_name_for_pid
 
 logger = get_logger()
 
 
 def uia_probe_disabled() -> bool:
-    return os.environ.get("WINREC_DISABLE_UIA", "").strip() in ("1", "true", "yes")
+    """Emergency off-switch only (``WINREC_DISABLE_UIA=1``). UIA is on by default."""
+    return os.environ.get("WINREC_DISABLE_UIA", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 @dataclass
@@ -52,15 +56,12 @@ class NullDesktopCallUiaProbe:
     def stop(self) -> None:
         return
 
-    def tick(self) -> None:
-        return
-
     def snapshot(self) -> DesktopCallPresence:
         return DesktopCallPresence(active=False, timestamp=time.time())
 
 
 class WindowsDesktopCallUiaProbe:
-    """Cached UIA scan; call ``tick()`` from the COM probe thread only."""
+    """Background UIA scan; ``snapshot()`` reads a lock-protected cache only."""
 
     def __init__(
         self,
@@ -75,16 +76,11 @@ class WindowsDesktopCallUiaProbe:
         self._snapshot = DesktopCallPresence(active=False)
         self._windows = bool(is_windows())
         self._last_error_log_ts = 0.0
-        self._last_tick_ts = 0.0
-        self._inline_mode = True
         self._consecutive_failures = 0
         self._disabled_until_ts = 0.0
 
     def start(self) -> None:
         if not self._windows or uia_probe_disabled():
-            return
-        if self._inline_mode:
-            logger.info("desktop_uia_probe_inline | host=call-session-probe")
             return
         if self._thread and self._thread.is_alive():
             return
@@ -100,43 +96,6 @@ class WindowsDesktopCallUiaProbe:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.5)
 
-    def tick(self) -> None:
-        """Run one scan if the interval elapsed (COM thread only)."""
-        if not self._windows or uia_probe_disabled():
-            return
-        if time.monotonic() < self._disabled_until_ts:
-            return
-        now = time.monotonic()
-        if now - self._last_tick_ts < self.interval_seconds:
-            return
-        self._last_tick_ts = now
-        try:
-            snap = self._scan_once()
-            with self._lock:
-                self._snapshot = snap
-            self._consecutive_failures = 0
-            if detector_trace_enabled() and snap.score > 0:
-                logger.info(
-                    "uia_probe | app=%s | score=%s | matched=%s | pid=%s",
-                    snap.app_id,
-                    snap.score,
-                    ",".join(snap.matched[:8]),
-                    snap.pid or "",
-                )
-        except Exception:
-            self._consecutive_failures += 1
-            now_log = time.monotonic()
-            if now_log - self._last_error_log_ts >= self.rules.uia_error_log_interval_seconds:
-                self._last_error_log_ts = now_log
-                logger.exception("desktop_uia_probe_failed")
-            if self._consecutive_failures >= 5:
-                self._disabled_until_ts = time.monotonic() + 60.0
-                logger.warning(
-                    "desktop_uia_probe_paused | failures=%s | resume_in=60s",
-                    self._consecutive_failures,
-                )
-                self._consecutive_failures = 0
-
     def snapshot(self) -> DesktopCallPresence:
         with self._lock:
             return DesktopCallPresence(
@@ -151,24 +110,54 @@ class WindowsDesktopCallUiaProbe:
             )
 
     def _run_thread(self) -> None:
-        """Legacy standalone thread (dev only); prefer inline ``tick()``."""
+        startup_delay = float(os.environ.get("WINREC_UIA_PROBE_START_DELAY", "5"))
+        if startup_delay > 0:
+            time.sleep(startup_delay)
         try:
-            import comtypes  # type: ignore
-
-            comtypes.CoInitialize()
+            import uiautomation as auto  # type: ignore
         except Exception:
-            pass
-        try:
-            while not self._stop_event.is_set():
-                self.tick()
-                time.sleep(0.2)
-        finally:
-            try:
-                import comtypes  # type: ignore
+            logger.exception("desktop_uia_probe_import_failed")
+            return
 
-                comtypes.CoUninitialize()
-            except Exception:
-                pass
+        try:
+            with auto.UIAutomationInitializerInThread():
+                while not self._stop_event.is_set():
+                    if time.monotonic() < self._disabled_until_ts:
+                        self._stop_event.wait(self.interval_seconds)
+                        continue
+                    try:
+                        clear_parent_cache()
+                        snap = self._scan_once()
+                        with self._lock:
+                            self._snapshot = snap
+                        self._consecutive_failures = 0
+                        if detector_trace_enabled() and snap.score > 0:
+                            logger.info(
+                                "uia_probe | app=%s | score=%s | matched=%s | pid=%s",
+                                snap.app_id,
+                                snap.score,
+                                ",".join(snap.matched[:8]),
+                                snap.pid or "",
+                            )
+                    except Exception:
+                        self._consecutive_failures += 1
+                        now_log = time.monotonic()
+                        if (
+                            now_log - self._last_error_log_ts
+                            >= self.rules.uia_error_log_interval_seconds
+                        ):
+                            self._last_error_log_ts = now_log
+                            logger.exception("desktop_uia_probe_failed")
+                        if self._consecutive_failures >= 5:
+                            self._disabled_until_ts = time.monotonic() + 60.0
+                            logger.warning(
+                                "desktop_uia_probe_paused | failures=%s | resume_in=60s",
+                                self._consecutive_failures,
+                            )
+                            self._consecutive_failures = 0
+                    self._stop_event.wait(self.interval_seconds)
+        except Exception:
+            logger.exception("desktop_uia_probe_thread_exit")
 
     def _scan_once(self) -> DesktopCallPresence:
         if not self._windows:
@@ -218,9 +207,7 @@ class WindowsDesktopCallUiaProbe:
             if not meets_window_gate(profile, text_blob):
                 continue
 
-            has_loopback = False
-            has_capture = False
-            score, matched = score_uia_text(profile, text_blob, has_loopback, has_capture)
+            score, matched = score_uia_text(profile, text_blob, False, False)
 
             if score > best.score:
                 best = DesktopCallPresence(
@@ -284,3 +271,21 @@ class WindowsDesktopCallUiaProbe:
                 )
 
         return " ".join(parts)
+
+
+def create_desktop_probe():
+    """UIA probe by default; title-only fallback if UIA disabled or import fails."""
+    if not is_windows():
+        return NullDesktopCallUiaProbe()
+    if uia_probe_disabled():
+        from windows_desktop_title_probe import WindowsDesktopTitleProbe
+
+        logger.info("desktop_probe_factory | mode=title | reason=WINREC_DISABLE_UIA")
+        return WindowsDesktopTitleProbe()
+    try:
+        return WindowsDesktopCallUiaProbe()
+    except Exception:
+        logger.exception("desktop_probe_factory | mode=uia_failed_using_title")
+        from windows_desktop_title_probe import WindowsDesktopTitleProbe
+
+        return WindowsDesktopTitleProbe()

@@ -30,13 +30,13 @@ class ProcessHeartbeatTests(unittest.TestCase):
 
 
 class DesktopProbeFactoryTests(unittest.TestCase):
-    def test_default_probe_is_title_not_uia(self):
+    def test_default_probe_is_uia_unless_disabled(self):
         from platform_runtime import is_windows
 
         if not is_windows():
             self.skipTest("Windows-only probe factory")
-        os.environ.pop("WINREC_ENABLE_UIA", None)
-        from windows_desktop_title_probe import create_desktop_probe
+        os.environ.pop("WINREC_DISABLE_UIA", None)
+        from windows_desktop_call_uia_probe import create_desktop_probe
 
         probe = create_desktop_probe()
-        self.assertEqual(probe.__class__.__name__, "WindowsDesktopTitleProbe")
+        self.assertEqual(probe.__class__.__name__, "WindowsDesktopCallUiaProbe")

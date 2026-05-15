@@ -378,10 +378,20 @@ def meets_window_gate(profile: DesktopCallAppProfile, window_text: str) -> bool:
 
 def resolve_logical_app_id(pid: int, process_name: str) -> str | None:
     """Map a process name (or WebView2 child) to a desktop call ``app_id``."""
+    from platform_runtime import is_windows
+    from windows_process_utils import resolve_app_id_from_process_tree
+
     name = (process_name or "").lower()
     if name in ROOT_PROCESS_TO_APP_ID:
         return ROOT_PROCESS_TO_APP_ID[name]
-    if name != WEBVIEW2_PROCESS or not pid or psutil is None:
+    if name != WEBVIEW2_PROCESS or not pid:
+        return None
+    if is_windows():
+        app_id = resolve_app_id_from_process_tree(
+            pid, process_name, ROOT_PROCESS_TO_APP_ID
+        )
+        return app_id or None
+    if psutil is None:
         return None
     try:
         for parent in psutil.Process(pid).parents():

@@ -159,11 +159,6 @@ class WindowsCallSessionProbe:
                     snap = self._collect_snapshot()
                     with self._lock:
                         self._snapshot = snap
-                    if self._desktop_uia_probe is not None:
-                        try:
-                            self._desktop_uia_probe.tick()
-                        except Exception:
-                            logger.exception("desktop_uia_probe_tick_failed")
                 except Exception:
                     logger.exception("CallSessionProbe iteration failed.")
                     with self._lock:

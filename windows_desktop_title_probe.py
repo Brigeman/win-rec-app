@@ -1,7 +1,6 @@
 """Desktop call detection via Win32 window titles (no UI Automation / COM).
 
-``uiautomation`` marshals COM into Qt's STA main thread and can freeze or
-crash the whole app. This probe only uses ``user32`` window enumeration.
+Must run on its own thread, never on the pycaw/COM ``call-session-probe`` thread.
 """
 
 from __future__ import annotations
@@ -10,7 +9,6 @@ import ctypes
 import os
 import threading
 import time
-from dataclasses import dataclass, field
 from typing import List, Tuple
 
 from app_logger import get_logger
@@ -24,7 +22,7 @@ from detector_trace import detector_trace_enabled
 from detection_rules import DEFAULT_UNIVERSAL_RULES, UniversalCallRules
 from platform_runtime import is_windows
 from windows_desktop_call_uia_probe import DesktopCallPresence, NullDesktopCallUiaProbe
-from windows_process_utils import process_name_for_pid
+from windows_process_utils import clear_parent_cache, process_name_for_pid
 
 logger = get_logger()
 
@@ -32,7 +30,7 @@ GW_OWNER = 4
 
 
 class WindowsDesktopTitleProbe:
-    """Cached title scan; ``tick()`` runs on the audio probe thread."""
+    """Background title scan (Win32 only, separate from Core Audio COM)."""
 
     def __init__(
         self,
@@ -41,40 +39,31 @@ class WindowsDesktopTitleProbe:
     ):
         self.interval_seconds = interval_seconds
         self.rules = rules
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._snapshot = DesktopCallPresence(active=False)
         self._windows = bool(is_windows())
-        self._last_tick_ts = 0.0
-        self._startup_delay_seconds = 2.0
-        self._started_ts = time.monotonic()
 
     def start(self) -> None:
-        if self._windows:
-            logger.info("desktop_title_probe_inline | host=call-session-probe")
-
-    def stop(self) -> None:
-        return
-
-    def tick(self) -> None:
         if not self._windows:
             return
-        now = time.monotonic()
-        if now - self._started_ts < self._startup_delay_seconds:
+        if self._thread and self._thread.is_alive():
             return
-        if now - self._last_tick_ts < self.interval_seconds:
-            return
-        self._last_tick_ts = now
-        snap = self._scan_once()
-        with self._lock:
-            self._snapshot = snap
-        if detector_trace_enabled() and snap.score > 0:
-            logger.info(
-                "title_probe | app=%s | score=%s | matched=%s | pid=%s",
-                snap.app_id,
-                snap.score,
-                ",".join(snap.matched[:8]),
-                snap.pid or "",
-            )
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="desktop-title-probe", daemon=True
+        )
+        self._thread.start()
+        logger.info("desktop_title_probe_start | thread=%s", self._thread.name)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.5)
+
+    def tick(self) -> None:
+        """Manual tick (tests); production uses :meth:`_run`."""
 
     def snapshot(self) -> DesktopCallPresence:
         with self._lock:
@@ -88,6 +77,28 @@ class WindowsDesktopTitleProbe:
                 matched=list(self._snapshot.matched),
                 timestamp=self._snapshot.timestamp,
             )
+
+    def _run(self) -> None:
+        startup_delay = float(os.environ.get("WINREC_TITLE_PROBE_START_DELAY", "5"))
+        if startup_delay > 0:
+            time.sleep(startup_delay)
+        while not self._stop_event.is_set():
+            try:
+                clear_parent_cache()
+                snap = self._scan_once()
+                with self._lock:
+                    self._snapshot = snap
+                if detector_trace_enabled() and snap.score > 0:
+                    logger.info(
+                        "title_probe | app=%s | score=%s | matched=%s | pid=%s",
+                        snap.app_id,
+                        snap.score,
+                        ",".join(snap.matched[:8]),
+                        snap.pid or "",
+                    )
+            except Exception:
+                logger.exception("desktop_title_probe_failed")
+            self._stop_event.wait(self.interval_seconds)
 
     def _scan_once(self) -> DesktopCallPresence:
         best = DesktopCallPresence(active=False)
@@ -111,11 +122,10 @@ class WindowsDesktopTitleProbe:
             if profile is None:
                 continue
 
-            text_blob = title
-            if not meets_window_gate(profile, text_blob):
+            if not meets_window_gate(profile, title):
                 continue
 
-            score, matched = score_uia_text(profile, text_blob, False, False)
+            score, matched = score_uia_text(profile, title, False, False)
             if score > best.score:
                 best = DesktopCallPresence(
                     active=score >= profile.min_score,
@@ -169,16 +179,7 @@ def _enum_visible_windows() -> List[Tuple[int, int, str]]:
 
 
 def create_desktop_probe():
-    """Title probe by default; opt-in UIA via ``WINREC_ENABLE_UIA=1``."""
-    if not is_windows():
-        return NullDesktopCallUiaProbe()
-    if os.environ.get("WINREC_ENABLE_UIA", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    ):
-        from windows_desktop_call_uia_probe import WindowsDesktopCallUiaProbe
+    """Use :func:`windows_desktop_call_uia_probe.create_desktop_probe` (UIA default)."""
+    from windows_desktop_call_uia_probe import create_desktop_probe as _factory
 
-        logger.info("desktop_probe_factory | mode=uia")
-        return WindowsDesktopCallUiaProbe()
-    return WindowsDesktopTitleProbe()
+    return _factory()

@@ -74,7 +74,7 @@ class UniversalCallDetector:
     @staticmethod
     def _create_desktop_uia_probe():
         try:
-            from windows_desktop_title_probe import create_desktop_probe
+            from windows_desktop_call_uia_probe import create_desktop_probe
 
             return create_desktop_probe()
         except Exception:
@@ -85,13 +85,9 @@ class UniversalCallDetector:
     def start(self) -> None:
         self.call_probe.start()
         self.audio_probe.start()
+        # Title/UIA probe must not share the pycaw COM thread (psutil/COM races).
         if self.desktop_uia_probe:
-            attach = getattr(self.call_probe, "attach_desktop_uia_probe", None)
-            if callable(attach):
-                attach(self.desktop_uia_probe)
-                self.desktop_uia_probe.start()
-            else:
-                self.desktop_uia_probe.start()
+            self.desktop_uia_probe.start()
 
     def stop(self) -> None:
         try:
