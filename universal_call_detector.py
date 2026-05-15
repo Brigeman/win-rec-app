@@ -92,7 +92,12 @@ class UniversalCallDetector:
         self.call_probe.start()
         self.audio_probe.start()
         if self.desktop_uia_probe:
-            self.desktop_uia_probe.start()
+            attach = getattr(self.call_probe, "attach_desktop_uia_probe", None)
+            if callable(attach):
+                attach(self.desktop_uia_probe)
+                self.desktop_uia_probe.start()
+            else:
+                self.desktop_uia_probe.start()
 
     def stop(self) -> None:
         try:

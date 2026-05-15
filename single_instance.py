@@ -23,6 +23,13 @@ class SingleInstanceGuard:
         self._mutex_handle: Optional[int] = None
         self._pid_lock_path = os.path.join(app_support_dir(), _PID_LOCK_NAME)
 
+    def _write_pid_lock(self) -> None:
+        try:
+            with open(self._pid_lock_path, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+        except Exception:
+            pass
+
     def try_acquire(self) -> bool:
         if os.environ.get("WIN_REC_ALLOW_MULTI_INSTANCE", "").strip() == "1":
             return True
@@ -30,7 +37,7 @@ class SingleInstanceGuard:
             return self._try_acquire_windows_mutex()
         return self._try_acquire_pid_file()
 
-    def _try_acquire_windows_mutex(self) -> bool:
+    def _try_acquire_windows_mutex(self, allow_retry: bool = True) -> bool:
         try:
             import ctypes
 
@@ -44,9 +51,25 @@ class SingleInstanceGuard:
             return self._try_acquire_pid_file()
         if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
             kernel32.CloseHandle(handle)
+            if allow_retry and self._mutex_owner_is_dead():
+                return self._try_acquire_windows_mutex(allow_retry=False)
             return False
         self._mutex_handle = int(handle)
+        self._write_pid_lock()
         return True
+
+    def _mutex_owner_is_dead(self) -> bool:
+        """If the pid lock names a process that exited, retry mutex once."""
+        try:
+            if not os.path.exists(self._pid_lock_path):
+                return False
+            with open(self._pid_lock_path, "r", encoding="utf-8") as f:
+                old_pid = int((f.read() or "").strip() or "0")
+        except Exception:
+            return False
+        if old_pid <= 0 or old_pid == os.getpid():
+            return False
+        return not self._pid_is_alive(old_pid)
 
     def _try_acquire_pid_file(self) -> bool:
         try:

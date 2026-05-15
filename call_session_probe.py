@@ -19,6 +19,7 @@ from app_logger import get_logger
 from call_probe import CallPidState, CallSessionSnapshot
 from detector_trace import detector_trace_enabled
 from platform_runtime import is_windows
+from windows_process_utils import process_name_for_pid
 
 logger = get_logger()
 
@@ -52,6 +53,9 @@ class WindowsCallSessionProbe:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._snapshot = CallSessionSnapshot(available=False)
+        self._desktop_uia_probe = None
+        self._cached_self_pids: Set[int] = {os.getpid()}
+        self._self_pids_refresh_ts: float = 0.0
         # IMPORTANT: Never import ``pycaw`` / ``comtypes`` in the Qt GUI
         # thread --- their import path calls ``CoInitializeEx`` which
         # conflicts with COM already initialized by PyQt
@@ -60,6 +64,10 @@ class WindowsCallSessionProbe:
         self._windows = bool(is_windows())
         if not self._windows:
             logger.info("probe_skip | reason=non_windows_platform")
+
+    def attach_desktop_uia_probe(self, probe) -> None:
+        """Run UIA ``tick()`` on this probe's COM thread (avoids cross-thread COM)."""
+        self._desktop_uia_probe = probe
         # since_ts persistence across snapshots (PID seen continuously).
         self._pid_first_seen: Dict[int, float] = {}
         # Per-endpoint error throttling and device-change tracking.
@@ -146,6 +154,11 @@ class WindowsCallSessionProbe:
                     snap = self._collect_snapshot()
                     with self._lock:
                         self._snapshot = snap
+                    if self._desktop_uia_probe is not None:
+                        try:
+                            self._desktop_uia_probe.tick()
+                        except Exception:
+                            logger.exception("desktop_uia_probe_tick_failed")
                 except Exception:
                     logger.exception("CallSessionProbe iteration failed.")
                     with self._lock:
@@ -162,28 +175,27 @@ class WindowsCallSessionProbe:
                 pass
 
     def _self_pids(self) -> Set[int]:
+        now = time.monotonic()
+        if now - self._self_pids_refresh_ts < 30.0:
+            return set(self._cached_self_pids)
         pids: Set[int] = {os.getpid()}
-        if psutil is None:
-            return pids
-        try:
-            me = psutil.Process(os.getpid())
-            for child in me.children(recursive=True):
-                try:
-                    pids.add(child.pid)
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return pids
+        if psutil is not None:
+            try:
+                me = psutil.Process(os.getpid())
+                for child in me.children(recursive=False):
+                    try:
+                        pids.add(int(child.pid))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        self._cached_self_pids = pids
+        self._self_pids_refresh_ts = now
+        return set(pids)
 
     @staticmethod
     def _process_name(pid: int) -> str:
-        if not pid or psutil is None:
-            return ""
-        try:
-            return (psutil.Process(pid).name() or "").lower()
-        except Exception:
-            return ""
+        return process_name_for_pid(pid)
 
     def _collect_snapshot(self) -> CallSessionSnapshot:
         # Imports kept local so module load doesn't require pycaw.

@@ -245,9 +245,10 @@ class UniversalCallRules:
     uia_dismiss_cooldown_seconds: float = 90.0
     uia_stop_score_threshold: int = 50
     known_app_capture_loopback_sustain: float = 2.0
-    uia_max_depth: int = 5
-    uia_max_nodes: int = 300
-    uia_max_scan_seconds: float = 0.5
+    uia_max_depth: int = 2
+    uia_max_nodes: int = 80
+    uia_max_windows: int = 24
+    uia_max_scan_seconds: float = 0.35
     uia_error_log_interval_seconds: float = 30.0
     # Secondary "listener-only / split PID" path: capture PID and
     # render PID can live on different processes (Electron WebRTC).
