@@ -18,6 +18,7 @@ from call_probe import CallPidState, CallSessionSnapshot  # noqa: E402
 from detection_rules import DEFAULT_UNIVERSAL_RULES, UniversalCallRules  # noqa: E402
 from meeting_detection import AudioActivity  # noqa: E402
 from universal_call_detector import UniversalCallDetector  # noqa: E402
+from windows_desktop_call_uia_probe import DesktopCallPresence, NullDesktopCallUiaProbe  # noqa: E402
 
 
 class StubCallProbe:
@@ -82,12 +83,30 @@ def _quiet_audio() -> AudioActivity:
     return AudioActivity(rms=0.0, peak=0.0, sustained_seconds=0.0)
 
 
-def _build_detector(probe, loopback=None, rules=None):
+class StubDesktopUiaProbe:
+    def __init__(self, presence: DesktopCallPresence | None = None):
+        self._presence = presence or DesktopCallPresence(active=False)
+
+    def start(self) -> None:
+        return
+
+    def stop(self) -> None:
+        return
+
+    def snapshot(self) -> DesktopCallPresence:
+        return self._presence
+
+    def set_presence(self, presence: DesktopCallPresence) -> None:
+        self._presence = presence
+
+
+def _build_detector(probe, loopback=None, rules=None, uia_probe=None):
     rules = rules or DEFAULT_UNIVERSAL_RULES
     detector = UniversalCallDetector(
         call_probe=probe,
         universal_rules=rules,
         loopback_probe=loopback or StubLoopbackProbe(_quiet_audio()),
+        desktop_uia_probe=uia_probe if uia_probe is not None else NullDesktopCallUiaProbe(),
     )
     return detector
 
@@ -99,7 +118,7 @@ class UniversalDetectorTests(unittest.TestCase):
         decision = detector.evaluate(is_recording=False)
         self.assertFalse(decision.should_prompt_start)
         self.assertFalse(decision.should_prompt_stop)
-        self.assertEqual(decision.reason, "no_call_pid")
+        self.assertEqual(decision.reason, "no_call_signal")
 
     def test_probe_unavailable_returns_probe_unavailable(self):
         probe = StubCallProbe(_empty_snapshot(available=False))
@@ -177,7 +196,7 @@ class UniversalDetectorTests(unittest.TestCase):
         detector = _build_detector(probe)
         decision = detector.evaluate(is_recording=False)
         self.assertFalse(decision.should_prompt_start)
-        self.assertEqual(decision.reason, "no_call_pid")
+        self.assertEqual(decision.reason, "no_call_signal")
 
     def test_negative_service_pid_does_not_prompt(self):
         state = CallPidState(
@@ -193,7 +212,7 @@ class UniversalDetectorTests(unittest.TestCase):
         detector = _build_detector(probe)
         decision = detector.evaluate(is_recording=False)
         self.assertFalse(decision.should_prompt_start)
-        self.assertEqual(decision.reason, "no_call_pid")
+        self.assertEqual(decision.reason, "no_call_signal")
 
     def test_low_capture_peak_does_not_prompt(self):
         state = CallPidState(
@@ -209,7 +228,7 @@ class UniversalDetectorTests(unittest.TestCase):
         detector = _build_detector(probe)
         decision = detector.evaluate(is_recording=False)
         self.assertFalse(decision.should_prompt_start)
-        self.assertEqual(decision.reason, "no_call_pid")
+        self.assertEqual(decision.reason, "no_call_signal")
 
     def test_pid_disappearance_during_recording_prompts_stop(self):
         # First tick: call is active and sustained.
@@ -287,7 +306,11 @@ class UniversalDetectorTests(unittest.TestCase):
         decision = detector.evaluate(is_recording=False)
         self.assertTrue(decision.should_prompt_start, decision)
         self.assertEqual(decision.call_pid, 7001)
-        self.assertIn("universal_split_pid_call", decision.matched_rules)
+        self.assertTrue(
+            "universal_split_pid_call" in decision.matched_rules
+            or "known_app_capture_plus_loopback" in decision.matched_rules,
+            decision.matched_rules,
+        )
 
     def test_split_pid_without_sustained_loopback_does_not_prompt(self):
         capture_state = CallPidState(
@@ -331,10 +354,50 @@ class UniversalDetectorTests(unittest.TestCase):
         detector.set_cooldown_dismiss()
         # Clear the per-PID "already prompted" gate so we re-enter the
         # cooldown branch (a real dismissal would not flip both flags).
-        detector.prompted_pids.clear()
+        detector.prompted_keys.clear()
         second = detector.evaluate(is_recording=False)
         self.assertFalse(second.should_prompt_start)
         self.assertEqual(second.reason, "cooldown_active")
+
+    def test_uia_high_score_requires_sustain_before_prompt(self):
+        presence = DesktopCallPresence(
+            active=True,
+            app_id="teams",
+            display_name="Microsoft Teams",
+            process_name="ms-teams.exe",
+            pid=4242,
+            score=85,
+            matched=["strong:leave", "medium:mute"],
+        )
+        uia = StubDesktopUiaProbe(presence)
+        probe = StubCallProbe(_empty_snapshot())
+        detector = _build_detector(probe, uia_probe=uia)
+        early = detector.evaluate(is_recording=False)
+        self.assertFalse(early.should_prompt_start)
+        self.assertEqual(early.reason, "awaiting_sustain")
+
+        detector._best_signal_since_ts = time.time() - 5.0
+        late = detector.evaluate(is_recording=False)
+        self.assertTrue(late.should_prompt_start)
+        self.assertEqual(late.signal_source, "uia")
+
+    def test_known_app_capture_without_render_prompts(self):
+        state = CallPidState(
+            pid=4242,
+            process_name="ms-teams.exe",
+            render_active=False,
+            capture_active=True,
+            capture_peak=0.01,
+            since_ts=time.time() - 30.0,
+        )
+        probe = StubCallProbe(_snapshot_with([state]))
+        loopback = StubLoopbackProbe(
+            AudioActivity(rms=0.05, peak=0.2, sustained_seconds=5.0)
+        )
+        detector = _build_detector(probe, loopback=loopback)
+        decision = detector.evaluate(is_recording=False)
+        self.assertTrue(decision.should_prompt_start, decision)
+        self.assertIn("known_app_capture_plus_loopback", decision.matched_rules)
 
 
 if __name__ == "__main__":

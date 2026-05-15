@@ -46,6 +46,9 @@ class DetectionDecision:
     auto_stop: bool = False
     call_pid: Optional[int] = None
     call_process_name: str = ""
+    app_id: str = ""
+    app_display_name: str = ""
+    signal_source: str = ""
 
     # Backwards-compat alias for any external readers still using the old
     # name. Internal callers should migrate to ``should_prompt_start``.

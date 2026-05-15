@@ -42,13 +42,19 @@ DEFAULT_RULES = DetectionRuleSet(
     native_meeting_processes={
         "ms-teams.exe",
         "teams.exe",
+        "msteams.exe",
         "zoom.exe",
+        "slack.exe",
+        "discord.exe",
+        "telegram.exe",
+        "whatsapp.exe",
         "telemost.exe",
         "yandextelemost.exe",
     },
     teams_processes={
         "ms-teams.exe",
         "teams.exe",
+        "msteams.exe",
     },
     meeting_context_required_native_processes={
         "zoom.exe",
@@ -61,6 +67,10 @@ DEFAULT_RULES = DetectionRuleSet(
         "zoom.exe",
         "telemost.exe",
         "yandextelemost.exe",
+        # Teams desktop / PWA host: instant only when title matches
+        # ``strict_meeting_context_patterns`` (call/meeting UI, not Chat).
+        "ms-teams.exe",
+        "teams.exe",
     },
     browser_processes={
         "chrome.exe",
@@ -110,6 +120,18 @@ DEFAULT_RULES = DetectionRuleSet(
             r"(?:^|\s)meeting \| microsoft teams(?:\s|$)",
             r"(?:^|\s)собрание \| microsoft teams(?:\s|$)",
             r"in a meeting",
+            # Microsoft Teams (new + classic) active call / join UI.
+            r"(?:^|\s)call with\b",
+            r"(?:^|\s)calling\b",
+            r"(?:^|\s)connecting\b",
+            r"(?:^|\s)joining\b.*\bmeeting\b",
+            r"(?:^|\s)звонок с\b",
+            r"(?:^|\s)вызов\b",
+            r"(?:^|\s)присоединение к собранию\b",
+            r"(?:^|\s)вход в собрание\b",
+            r"(?:^|\s)meeting in progress\b",
+            r"(?:^|\s)screen sharing\b",
+            r"(?:^|\s)демонстрация экрана\b",
         ]
     ),
     instant_prompt_browser_patterns=_patterns(
@@ -213,16 +235,26 @@ class UniversalCallRules:
 
     call_start_sustain_seconds: float = 3.0
     call_end_sustain_seconds: float = 8.0
-    min_capture_peak: float = 0.002
+    min_capture_peak: float = 0.0008
     instant_prompt_on_call_start: bool = True
     dismiss_cooldown_seconds: float = 30.0
     post_stop_cooldown_seconds: float = 120.0
+    uia_prompt_threshold: int = 70
+    uia_start_sustain_seconds: float = 2.5
+    uia_stop_sustain_seconds: float = 10.0
+    uia_dismiss_cooldown_seconds: float = 90.0
+    uia_stop_score_threshold: int = 50
+    known_app_capture_loopback_sustain: float = 2.0
+    uia_max_depth: int = 5
+    uia_max_nodes: int = 300
+    uia_max_scan_seconds: float = 0.5
+    uia_error_log_interval_seconds: float = 30.0
     # Secondary "listener-only / split PID" path: capture PID and
     # render PID can live on different processes (Electron WebRTC).
     # When loopback has been sustained ``split_pid_loopback_sustain``
     # seconds and there is any non-self capture session, we treat the
     # capture-active PID as the call PID.
-    split_pid_loopback_sustain: float = 6.0
+    split_pid_loopback_sustain: float = 4.0
     self_process_names: Set[str] = field(
         default_factory=lambda: {
             "win-rec-app.exe",
